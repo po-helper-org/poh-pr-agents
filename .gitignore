@@ -1,0 +1,7 @@
+# Secrets produced during self-hosted setup — never commit
+self-hosted/dokploy.env
+self-hosted/*.env
+self-hosted/*.pem
+self-hosted/secrets*.toml
+self-hosted/.secrets.toml
+*.pem

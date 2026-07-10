@@ -1,0 +1,72 @@
+# PR-Agent GitHub App (GLM-5) — self-hosted, for Dokploy "Compose" service.
+#
+# Why this exists: if GitHub Actions is unavailable (billing lock, no minutes,
+# org policy) the workflow in ../.github/workflows never runs. This runs the same
+# PR-Agent as a webhook GitHub App on your own box — no Actions involved.
+#
+# Set these in Dokploy → Environment (all plain, single-line — see SETUP.md):
+#   OPENAI_KEY               z.ai GLM-5 API key                 (required)
+#   GITHUB_APP_ID            the App's numeric ID               (required)
+#   GITHUB_WEBHOOK_SECRET    the App's webhook secret           (required)
+#   GITHUB_PRIVATE_KEY_B64   base64 of the App's .pem, one line (required)
+#   OPENAI_API_BASE          LLM endpoint  (optional, default z.ai)
+#   CONFIG_MODEL             model         (optional, default openai/glm-5)
+#   CONFIG_MAX_TOKENS        ctx limit     (optional, default 128000)
+#
+# Everything sensitive is written into pr-agent's .secrets.toml AT STARTUP by the
+# entrypoint. This is deliberate — see the gotchas in SETUP.md: pr-agent ignores
+# dotted env vars (OPENAI.KEY, CONFIG.MODEL, GITHUB.APP_ID) in this setup,
+# [config]/[openai] can't come from the repo .pr_agent.toml (host-restricted),
+# a multiline PEM breaks in env, and Dokploy File Mounts don't land in the
+# container path. Writing the file ourselves sidesteps all of it.
+services:
+  pr-agent:
+    build:
+      # Build the github_app image straight from upstream — no local clone needed.
+      context: https://github.com/qodo-ai/pr-agent.git
+      dockerfile: docker/Dockerfile
+      target: github_app
+    image: pr-agent-github-app:local
+    restart: unless-stopped
+    environment:
+      - PORT=3000
+      - "OPENAI_KEY=${OPENAI_KEY}"
+      - "OPENAI_API_BASE=${OPENAI_API_BASE:-}"
+      - "CONFIG_MODEL=${CONFIG_MODEL:-}"
+      - "CONFIG_MAX_TOKENS=${CONFIG_MAX_TOKENS:-}"
+      - "GITHUB_APP_ID=${GITHUB_APP_ID}"
+      - "GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}"
+      - "GITHUB_PRIVATE_KEY_B64=${GITHUB_PRIVATE_KEY_B64}"
+    # $$ escapes compose interpolation so values are read from the container env
+    # at runtime; ${VAR:-default} supplies fallbacks. Writes the FULL [github],
+    # [openai] and [config] tables (pr-agent replaces a section wholesale when it
+    # loads .secrets.toml, so partial tables lose their other keys).
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mkdir -p /app/pr_agent/settings
+        {
+          printf '[openai]\n'
+          printf 'key = "%s"\n' "$$OPENAI_KEY"
+          printf 'api_base = "%s"\n' "$${OPENAI_API_BASE:-https://api.z.ai/api/coding/paas/v4}"
+          printf '\n[config]\n'
+          printf 'git_provider = "github"\n'
+          printf 'model = "%s"\n' "$${CONFIG_MODEL:-openai/glm-5}"
+          printf 'model_turbo = "%s"\n' "$${CONFIG_MODEL:-openai/glm-5}"
+          printf 'fallback_models = ["%s"]\n' "$${CONFIG_MODEL:-openai/glm-5}"
+          printf 'custom_model_max_tokens = %s\n' "$${CONFIG_MAX_TOKENS:-128000}"
+          printf '\n[github]\n'
+          printf 'deployment_type = "app"\n'
+          printf 'app_id = "%s"\n' "$$GITHUB_APP_ID"
+          printf 'webhook_secret = "%s"\n' "$$GITHUB_WEBHOOK_SECRET"
+          printf 'private_key = """\n'
+          printf '%s' "$$GITHUB_PRIVATE_KEY_B64" | base64 -d
+          printf '\n"""\n'
+        } > /app/pr_agent/settings/.secrets.toml
+        exec python -m gunicorn -k uvicorn.workers.UvicornWorker \
+          -c pr_agent/servers/gunicorn_config.py --forwarded-allow-ips '*' \
+          pr_agent.servers.github_app:app
+    expose:
+      - "3000"

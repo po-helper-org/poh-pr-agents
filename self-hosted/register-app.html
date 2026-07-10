@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Register PR-Agent GitHub App</title>
+<style>
+ body{font:16px/1.55 system-ui,sans-serif;max-width:680px;margin:40px auto;padding:0 16px;color:#111}
+ label{display:block;margin:14px 0 4px;font-weight:600}
+ input{width:100%;padding:9px 11px;font:15px monospace;border:1px solid #ccc;border-radius:8px;box-sizing:border-box}
+ button{margin-top:22px;font:600 16px system-ui;padding:12px 20px;border:0;border-radius:8px;background:#1f6feb;color:#fff;cursor:pointer}
+ code{background:#f0f0f0;padding:2px 6px;border-radius:4px}
+ pre{background:#f6f8fa;padding:12px;border-radius:8px;overflow:auto}
+ small{color:#555}
+</style></head>
+<body>
+<h1>Create the PR-Agent GitHub App</h1>
+<p>GitHub Apps can only be created in the browser (no API). Fill the two fields,
+click the button — GitHub opens a pre-filled creation page. Press <b>Create GitHub
+App</b> there. It auto-generates the App ID, private key and webhook secret.</p>
+
+<label>Your repo <small>(owner/name)</small></label>
+<input id="repo" placeholder="owner/name" value="">
+
+<label>Webhook base URL <small>(where the App will run — no trailing slash)</small></label>
+<input id="base" placeholder="https://pr-agent.example.com  or  http://sub.traefik.me" value="">
+
+<form id="f" action="https://github.com/settings/apps/new?state=pragent" method="post" target="_blank">
+  <input type="hidden" name="manifest" id="manifest">
+  <button type="submit" onclick="return build()">Create GitHub App →</button>
+</form>
+
+<h2>After you click Create</h2>
+<p>GitHub redirects to <code>&lt;base&gt;/?code=…</code> (the page may not load — fine).
+Copy the <code>code</code> from the address bar and run:</p>
+<pre>bash finish-registration.sh &lt;code&gt;</pre>
+<p>That writes <code>dokploy.env</code> with <code>GITHUB_APP_ID</code>,
+<code>GITHUB_WEBHOOK_SECRET</code> and <code>GITHUB_PRIVATE_KEY_B64</code> ready to
+paste into Dokploy. Add your <code>OPENAI_KEY</code> and deploy.</p>
+
+<script>
+function build(){
+  var repo=document.getElementById('repo').value.trim().replace(/^\/+|\/+$/g,'');
+  var base=document.getElementById('base').value.trim().replace(/\/+$/,'');
+  if(!repo || !base){ alert('Fill both fields'); return false; }
+  var manifest={
+    name: (repo.split('/')[1]||'repo')+"-pr-review",
+    url: "https://github.com/"+repo,
+    hook_attributes: { url: base+"/api/v1/github_webhooks" },
+    redirect_url: base+"/",
+    public: false,
+    default_permissions: { pull_requests:"write", issues:"write", contents:"read", metadata:"read" },
+    default_events: ["pull_request","issue_comment","push"]
+  };
+  document.getElementById('manifest').value=JSON.stringify(manifest);
+  return true;
+}
+</script>
+</body></html>

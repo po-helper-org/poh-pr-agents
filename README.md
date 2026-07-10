@@ -10,7 +10,20 @@
 
 ---
 
+## Два режима развёртывания
+
+| Режим | Когда | Гайд |
+|-------|-------|------|
+| **A. GitHub Actions** | Actions доступны (публичный репо или есть минуты). Проще всего. | [Быстрый старт](#быстрый-старт-3-шага) ниже |
+| **B. Self-hosted (Dokploy)** | Actions **недоступны**: аккаунт залочен по биллингу (`account is locked due to a billing issue`), кончились минуты, запрет политикой. Свой сервер, webhook GitHub App — мимо Actions. | [`self-hosted/SETUP.md`](self-hosted/SETUP.md) |
+
+> Режим B — то же ревью, но как **webhook-приложение** на вашей инфре: авто-ревью на открытие PR + диалог командами (`/ask`, `/review`, …), one-shot по [runbook'у](self-hosted/SETUP.md) со всеми подводными камнями. Важно: self-hosted **runner Actions биллинг-лок НЕ обходит** — только webhook App.
+
+---
+
 ## Быстрый старт (3 шага)
+
+> Это режим **A** (GitHub Actions). Для self-hosted → [`self-hosted/SETUP.md`](self-hosted/SETUP.md).
 
 ### 1. Положите конфиг в репозиторий
 

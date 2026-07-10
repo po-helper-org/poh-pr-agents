@@ -1,0 +1,34 @@
+# Review behavior for your repo (no secrets — commit this to your repo root).
+# The self-hosted App reads it live; edits apply without redeploying the App.
+# NOTE: model / endpoint / keys can NOT be set here (host-restricted) — those
+# live in the App's env / .secrets.toml. This file only shapes review output.
+
+[github_app]
+# Tools run automatically when a PR is opened / reopened / marked ready.
+pr_commands = [
+    "/describe",
+    "/review",
+    "/improve",
+]
+# Re-run on new commits pushed to an open PR (App must subscribe to the Push event).
+handle_push_trigger = true
+push_commands = [
+    "/describe",
+    "/review",
+]
+
+[pr_reviewer]
+# extra_instructions is where you steer tone, language and focus.
+extra_instructions = """\
+Reply in English. Focus on correctness, security (no secret/PII leaks) and \
+clear defects introduced by the diff. Don't nitpick formatting.\
+"""
+require_score_review = true
+require_tests_review = false
+num_code_suggestions = 0        # suggestions come from the /improve tool
+
+[pr_description]
+publish_labels = true
+
+[pr_code_suggestions]
+num_code_suggestions = 4
