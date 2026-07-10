@@ -1,0 +1,77 @@
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+
+jobs:
+  ai-describe:
+    if: ${{ github.event.sender.type != 'Bot' }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: write
+    name: AI PR Description
+    steps:
+      - name: Describe PR
+        uses: the-pr-agent/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.ZAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_BASE: "https://api.z.ai/api/coding/paas/v4"
+          config.model: "openai/glm-5"
+          config.model_turbo: "openai/glm-5"
+          config.fallback_models: '["openai/glm-5"]'
+          config.custom_model_max_tokens: "128000"
+          github_action_config.auto_describe: "true"
+          github_action_config.auto_review: "false"
+          github_action_config.auto_improve: "false"
+
+  ai-review:
+    if: ${{ github.event.sender.type != 'Bot' }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: write
+    name: AI Code Review
+    steps:
+      - name: Review PR
+        uses: the-pr-agent/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.ZAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_BASE: "https://api.z.ai/api/coding/paas/v4"
+          config.model: "openai/glm-5"
+          config.model_turbo: "openai/glm-5"
+          config.fallback_models: '["openai/glm-5"]'
+          config.custom_model_max_tokens: "128000"
+          github_action_config.auto_describe: "false"
+          github_action_config.auto_review: "true"
+          github_action_config.auto_improve: "false"
+
+  ai-suggest:
+    if: ${{ github.event.sender.type != 'Bot' }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: write
+    name: AI Suggestions
+    steps:
+      - name: Suggest improvements
+        uses: the-pr-agent/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.ZAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_BASE: "https://api.z.ai/api/coding/paas/v4"
+          config.model: "openai/glm-5"
+          config.model_turbo: "openai/glm-5"
+          config.fallback_models: '["openai/glm-5"]'
+          config.custom_model_max_tokens: "128000"
+          github_action_config.auto_describe: "false"
+          github_action_config.auto_review: "false"
+          github_action_config.auto_improve: "true"
