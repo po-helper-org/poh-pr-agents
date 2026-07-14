@@ -5,3 +5,11 @@ self-hosted/*.pem
 self-hosted/secrets*.toml
 self-hosted/.secrets.toml
 *.pem
+
+# Python
+__pycache__/
+*.pyc
+*.sqlite
+*.db
+*.db-wal
+*.db-shm
