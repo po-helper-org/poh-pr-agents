@@ -7,6 +7,7 @@ RS256-подпись JWT требует crypto-библиотеки (PyJWT/crypt
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime
 from typing import Callable, Optional
@@ -28,14 +29,18 @@ class InstallationTokenProvider:
         self._api = api_base.rstrip("/")
         self._clock = clock
         self._cache: dict[str, "tuple[str, float]"] = {}
+        # сериализует получение токена (редкое — кэш ~1 ч), чтобы конкурентный
+        # промах не породил дублирующие обмены и не бил по rate-limit GitHub.
+        self._lock = threading.Lock()
 
     def get(self, repo: str) -> str:
-        cached = self._cache.get(repo)
-        if cached and cached[1] - 60 > self._clock():  # запас 60 c до истечения
-            return cached[0]
-        token, exp = self._exchange(repo)
-        self._cache[repo] = (token, exp)
-        return token
+        with self._lock:
+            cached = self._cache.get(repo)
+            if cached and cached[1] - 60 > self._clock():  # запас 60 c до истечения
+                return cached[0]
+            token, exp = self._exchange(repo)
+            self._cache[repo] = (token, exp)
+            return token
 
     def _headers(self, jwt: str) -> dict:
         return {"Authorization": f"Bearer {jwt}",

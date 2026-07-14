@@ -54,6 +54,21 @@ class TestInstallationTokenProvider(unittest.TestCase):
         self.p.get("o/r")
         self.assertEqual(len(self.t.calls), n + 2)
 
+    def test_malformed_expiry_falls_back_and_caches(self):
+        calls = {"n": 0}
+
+        def tr(method, url, headers, data):
+            calls["n"] += 1
+            if url.endswith("/installation"):
+                return 200, json.dumps({"id": 1}).encode()
+            return 201, json.dumps({"token": "ghs_x", "expires_at": "garbage"}).encode()
+
+        p = InstallationTokenProvider("a", "P", tr, signer, clock=self.clock)
+        self.assertEqual(p.get("o/r"), "ghs_x")   # битая дата не роняет
+        before = calls["n"]
+        self.assertEqual(p.get("o/r"), "ghs_x")   # из кэша (фолбэк exp=clock+3000)
+        self.assertEqual(calls["n"], before)      # без новых обменов
+
     def test_installation_lookup_error_raises(self):
         def bad(method, url, headers, data):
             return (500, b"err") if url.endswith("/installation") else (201, b"{}")
