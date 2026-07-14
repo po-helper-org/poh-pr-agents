@@ -57,6 +57,17 @@ class TestProcess(unittest.TestCase):
         self.assertTrue(r.skipped)
         self.assertEqual(spy.calls, 0)  # СТ-16
 
+    def test_redelivered_done_event_is_noop(self):
+        # СТ-17: воркер упал после DONE до ack → передоставка того же delivery_id
+        e = ev()
+        self.store.record_received(e)
+        process(e, FakeAnalyze(), self.store)  # DONE
+        spy = FakeAnalyze()
+        r = process(e, spy, self.store)  # не должно падать IllegalTransition
+        self.assertEqual(r.state, State.DONE)
+        self.assertTrue(r.skipped)
+        self.assertEqual(spy.calls, 0)
+
     def test_force_bypasses_already_done(self):
         a1 = ev(delivery="a:/review")
         self.store.record_received(a1)

@@ -95,6 +95,17 @@ class TestWorker(unittest.TestCase):
         self.assertEqual(out, "ack")
         self.assertEqual(spy.calls, 1)
 
+    def test_redelivered_done_event_acks_without_false_comment(self):
+        # СТ-17 chaos: успешно завершённое событие передоставлено → ack, без ложной эскалации
+        self._enqueue()
+        self._handle(FakeAnalyze())  # → DONE + ack
+        e = Event("d1", "o/r", 7, "abc", "/review")
+        self.queue.enqueue(event_to_dict(e), e.repo)  # передоставка того же delivery
+        out = self._handle(FakeAnalyze())
+        self.assertEqual(out, "ack")
+        self.assertEqual(self.client.calls, [])              # НЕТ ложного коммента
+        self.assertEqual(metrics.get("dead_letter_total"), 0)
+
     def test_run_once_empty_returns_false(self):
         self.assertFalse(run_once(self.queue, store=self.store, client=self.client,
                                   analyze=FakeAnalyze()))

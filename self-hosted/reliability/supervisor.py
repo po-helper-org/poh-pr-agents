@@ -22,7 +22,10 @@ class Result:
 
 
 def _drive_to_done(store: StateStore, delivery_id: str) -> None:
-    """Довести свежее (RECEIVED) событие до DONE легальными переходами."""
+    """No-op если событие уже терминал — защита от передоставки DONE-события
+    (воркер упал после DONE, но до ack); иначе довести до DONE легальными переходами."""
+    if store.state_of(delivery_id) in (State.DONE, State.DEAD_LETTER):
+        return
     for target in (State.QUEUED, State.PROCESSING, State.DONE):
         if store.state_of(delivery_id) != target:
             store.transition(delivery_id, target)

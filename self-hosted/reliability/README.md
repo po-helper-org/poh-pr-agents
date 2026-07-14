@@ -88,6 +88,9 @@ reconcile-enqueue с `force` (доверяет GitHub-истине, а не stor
 - Добить СТ-16 (атомарный claim + upsert-публикатор СТ-25), обогащение head_sha.
 - Консолидация слоёв ретрая: убрать пересечение sweeper-stale ↔ queue-redelivery
   (после split часть страховок sweeper дублирует visibility-timeout очереди).
+- Наблюдаемость poison-guard: DLQ на `lease` (повторные краши без nack) сейчас
+  эскалируется только через sweeper (окно ~stale_deadline); дать метрику/коммент в моменте.
+- СТ-18 автоскейл воркеров по глубине/возрасту очереди — Фаза 4 (сейчас только `queue.depth()`).
 - Ретеншн `queue.partition_service` (растёт по числу репозиториев — очистка/prune на масштабе).
 - LLM Gateway (СТ-19..24), полная observability/алерты (СТ-33..35) — Фазы 3–4.
 
