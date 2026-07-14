@@ -89,6 +89,20 @@ class TestProcess(unittest.TestCase):
         self.assertTrue(r.skipped)
         self.assertEqual(spy.calls, 0)  # СТ-16: без повторной работы
 
+    def test_force_bypasses_already_done(self):
+        # первый delivery делает работу (DONE по бизнес-ключу)
+        a = ev(delivery="a:/review")
+        self.store.record_received(a)
+        process(a, FakeAnalyze(), self.store, self.client, max_attempts=5)
+        # reconcile с force=True — не пропускаем, гоним анализ заново (GitHub — истина)
+        b = ev(delivery="b:/review")
+        self.store.record_received(b)
+        spy = FakeAnalyze()
+        r = process(b, spy, self.store, self.client, max_attempts=5, force=True)
+        self.assertEqual(spy.calls, 1)
+        self.assertEqual(r.state, State.DONE)
+        self.assertFalse(r.skipped)
+
 
 if __name__ == "__main__":
     unittest.main()

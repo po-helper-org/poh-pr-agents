@@ -18,7 +18,8 @@
 | `app.py` | СТ-3,5 | FastAPI-обвязка над `ingress` |
 | `token.py` | — | App JWT → installation token с кэшем (оркестрация тестируется) |
 | `analyze_adapter.py` | — | запуск анализа pr-agent + токен; реальные обёртки — на деплое |
-| `metrics.py` | СТ-27б | счётчики (`dead_letter_total`; зерно под СТ-33) |
+| `metrics.py` | СТ-27б | счётчики (`dead_letter_total`, `reconcile_escalated_total`) |
+| `sweeper.py` | СТ-13, 29..32 | **reconciliation**: застрявшие→retry/dead-letter, PR без ревью→reconcile, эскалация |
 
 ## Запуск тестов
 
@@ -61,9 +62,22 @@ Ingress заменяет webhook-вход pr-agent и вызывает его а
 - [ ] **Кэш токена — на процесс.** При нескольких uvicorn-воркерах кэш не общий (больше вызовов GitHub, но корректно).
 - [ ] **Смоук-тест.** Один реальный минтинг токена + один `_real_invoke` в стейджинге закрывают риски выше.
 
+## Reconciliation sweeper — статус
+
+Логика `sweep()` реализована и покрыта тестами (СТ-13, 29..32): застрявшие вне
+терминала → свежий retry или dead-letter; открытые PR без подтверждённого ревью →
+reconcile-enqueue с `force` (доверяет GitHub-истине, а не store-статусу — этим
+закрывается «проглоченный» сбой); эскалация после `max_cycles` циклов.
+
+Осталось для деплоя (интеграционные порты, как у `analyze_adapter`):
+- периодический раннер (крон/loop, интервал `sweeper.interval`);
+- порт `list_open_prs()` (GitHub API);
+- порт `has_completed_review(repo, number, head_sha, command)` — проверка наличия
+  ревью бота по head_sha (ground truth против проглоченного сбоя);
+- `enqueue(event, force=…)` → `supervisor.process(..., force=force)`.
+
 ## Дальше по фазам
 
 - Durable queue + split ingress/worker (СТ-6..9, 14..18) — Фаза 2.
-- Actioning stale + reconciliation sweeper (СТ-13, 29..32) — закрывает «проглоченный» сбой.
-- Добить СТ-16 (атомарный claim + upsert СТ-25), СТ-14 (таймаут), обогащение head_sha.
-- LLM Gateway (СТ-19..24), метрики/алерты (СТ-33..35) — Фазы 3–4.
+- Добить СТ-16 (атомарный claim + upsert-публикатор СТ-25), СТ-14 (per-task таймаут), обогащение head_sha.
+- LLM Gateway (СТ-19..24), полная observability/алерты (СТ-33..35) — Фазы 3–4.

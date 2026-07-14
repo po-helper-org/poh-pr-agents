@@ -36,9 +36,10 @@ def _drive_to_done(store: StateStore, delivery_id: str) -> None:
 
 
 def process(event: Event, analyze: Analyze, store: StateStore,
-            client: GitHubClient, *, max_attempts: int = 5) -> Result:
-    # СТ-16: та же работа (repo,number,head_sha,command) уже сделана другим delivery
-    if store.already_done(event.business_key):
+            client: GitHubClient, *, max_attempts: int = 5, force: bool = False) -> Result:
+    # СТ-16: та же работа уже сделана другим delivery. force=True — reconcile
+    # доверяет GitHub-истине (эффект отсутствует), поэтому пропуск не применяется.
+    if not force and store.already_done(event.business_key):
         _drive_to_done(store, event.delivery_id)
         row = store.get(event.delivery_id)
         return Result(State.DONE, int(row["attempts"]) if row else 0, notified=False, skipped=True)

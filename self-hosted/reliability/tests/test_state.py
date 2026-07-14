@@ -111,6 +111,25 @@ class TestStateStore(unittest.TestCase):
         stuck = self.store.stale(deadline_seconds=60)
         self.assertEqual([r["delivery_id"] for r in stuck], ["d1"])
 
+    # СТ-30: in_flight — событие вне терминала
+    def test_in_flight(self):
+        e = make_event()
+        self.store.record_received(e)
+        self.assertTrue(self.store.in_flight(e.business_key))
+        self.store.transition("d1", State.QUEUED)
+        self.store.transition("d1", State.PROCESSING)
+        self.store.transition("d1", State.DONE)
+        self.assertFalse(self.store.in_flight(e.business_key))  # терминал — не в работе
+
+    # СТ-32: счётчик reconcile-циклов
+    def test_reconcile_counter(self):
+        bk = "o/r#7@abc:/review"
+        self.assertEqual(self.store.reconcile_cycles(bk), 0)
+        self.assertEqual(self.store.bump_reconcile(bk), 1)
+        self.assertEqual(self.store.bump_reconcile(bk), 2)
+        self.store.clear_reconcile(bk)
+        self.assertEqual(self.store.reconcile_cycles(bk), 0)
+
     def test_stale_excludes_terminal(self):
         self.store.record_received(make_event())
         self.store.transition("d1", State.QUEUED)

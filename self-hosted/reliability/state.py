@@ -87,6 +87,11 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_events_business ON events(business_key);
             CREATE INDEX IF NOT EXISTS idx_events_state    ON events(state);
+            CREATE TABLE IF NOT EXISTS reconcile (
+                business_key TEXT PRIMARY KEY,
+                cycles       INTEGER NOT NULL DEFAULT 0,
+                updated_at   REAL NOT NULL
+            );
             """
         )
         self._db.commit()
@@ -163,3 +168,35 @@ class StateStore:
             f"SELECT * FROM events WHERE state NOT IN ({placeholders}) AND updated_at < ?",
             (*[s.value for s in TERMINAL], cutoff),
         ).fetchall()
+
+    def in_flight(self, business_key: str) -> bool:
+        """СТ-30: есть ли событие с этим бизнес-ключом вне терминала (в работе)."""
+        placeholders = ",".join("?" for _ in TERMINAL)
+        return self._db.execute(
+            f"SELECT 1 FROM events WHERE business_key=? AND state NOT IN ({placeholders}) LIMIT 1",
+            (business_key, *[s.value for s in TERMINAL]),
+        ).fetchone() is not None
+
+    def bump_reconcile(self, business_key: str) -> int:
+        """СТ-32: увеличить счётчик reconcile-циклов и вернуть новое значение."""
+        now = self._clock()
+        self._db.execute(
+            "INSERT INTO reconcile(business_key,cycles,updated_at) VALUES(?,1,?) "
+            "ON CONFLICT(business_key) DO UPDATE SET cycles=cycles+1, updated_at=?",
+            (business_key, now, now),
+        )
+        self._db.commit()
+        return int(self._db.execute(
+            "SELECT cycles FROM reconcile WHERE business_key=?", (business_key,)
+        ).fetchone()[0])
+
+    def reconcile_cycles(self, business_key: str) -> int:
+        row = self._db.execute(
+            "SELECT cycles FROM reconcile WHERE business_key=?", (business_key,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def clear_reconcile(self, business_key: str) -> None:
+        """Эффект подтверждён — обнулить счётчик (СТ-29)."""
+        self._db.execute("DELETE FROM reconcile WHERE business_key=?", (business_key,))
+        self._db.commit()
