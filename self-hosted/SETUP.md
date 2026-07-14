@@ -98,3 +98,31 @@ HTTP only** (its HTTPS is a self-signed `TRAEFIK DEFAULT CERT`). So:
 - **Diagnose auth from your laptop**: with the App ID + `.pem` you can mint an app
   JWT and query `GET /app`, `GET /app/installations`, `GET /app/hook/deliveries`
   to see exactly what GitHub sent and what the server returned.
+
+## Надёжность: тихие падения (Фаза 0)
+
+Симптом: доставки вебхуков зелёные (`200`), `/describe` иногда проходит, но
+`/review` / `/improve` **молча не появляются** и алерта нет. Причина архитектурная —
+вебхук отвечает `200` сразу, работа идёт в фоне, а при таймауте/ошибке LLM-вызова
+pr-agent **пишет ошибку в лог и ничего не постит**. Диагностика: логи контейнера
+сразу после «зависшего» вызова (`grep -iE "timeout|ratelimit|429|APIConnection|exception"`)
+и квота ключа Z.AI.
+
+Фаза 0 (issue #1, `SCALE-PLAN.md`) уже применена в этом compose/`.pr_agent.toml`:
+
+| Изменение | Где | Что даёт |
+|---|---|---|
+| `ai_timeout` 120 → 90 (env `CONFIG_AI_TIMEOUT`) | `.secrets.toml [config]` | зависший вызов падает за ~90 c, не держит воркер бесконечно |
+| `fallback_models` = модель ×2 | `.secrets.toml [config]` | один авто-ретрай на транзиентной ошибке |
+| `async_ai_calls=false`, `max_ai_calls=2` | `.pr_agent.toml [pr_description]` | меньше всплеск параллельных вызовов → реже 429 |
+| Docker healthcheck | `docker-compose.yml` | Swarm пересоздаёт мёртвый процесс |
+
+**Что Фаза 0 НЕ делает (честно):** конфиг не может сделать провал видимым в PR —
+upstream проглатывает исключение. Видимый комментарий при провале, детект
+логического зависания и гарантированное eventual-завершение приходят с wrapper'ом
+и reconciliation sweeper'ом (Фазы 2–3, issue #1). Внешний dead-man switch —
+issue #2.
+
+**Ограничение:** единственный ключ Z.AI ⇒ настоящего кросс-провайдерного резерва
+нет; аутейдж самого Z.AI Фаза 0 не переживёт (только ретраит). Второй провайдер —
+предусловие Фазы 4.

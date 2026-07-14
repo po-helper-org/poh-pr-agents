@@ -34,6 +34,7 @@ services:
       - "OPENAI_API_BASE=${OPENAI_API_BASE:-}"
       - "CONFIG_MODEL=${CONFIG_MODEL:-}"
       - "CONFIG_MAX_TOKENS=${CONFIG_MAX_TOKENS:-}"
+      - "CONFIG_AI_TIMEOUT=${CONFIG_AI_TIMEOUT:-}"   # fail-fast timeout, c (Фаза 0, issue #1)
       - "GITHUB_APP_ID=${GITHUB_APP_ID}"
       - "GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}"
       - "GITHUB_PRIVATE_KEY_B64=${GITHUB_PRIVATE_KEY_B64}"
@@ -55,8 +56,14 @@ services:
           printf 'git_provider = "github"\n'
           printf 'model = "%s"\n' "$${CONFIG_MODEL:-openai/glm-5}"
           printf 'model_turbo = "%s"\n' "$${CONFIG_MODEL:-openai/glm-5}"
-          printf 'fallback_models = ["%s"]\n' "$${CONFIG_MODEL:-openai/glm-5}"
+          # fallback_models повторяет ту же модель дважды: retry_with_fallback_models
+          # делает второй прогон при транзиентной ошибке. Единственный ключ Z.AI —
+          # настоящего кросс-провайдерного резерва нет (см. issue #1, Фаза 3/4).
+          printf 'fallback_models = ["%s", "%s"]\n' "$${CONFIG_MODEL:-openai/glm-5}" "$${CONFIG_MODEL:-openai/glm-5}"
           printf 'custom_model_max_tokens = %s\n' "$${CONFIG_MAX_TOKENS:-128000}"
+          # ai_timeout: fail-fast — зависший LLM-вызов падает за N c, а не держит
+          # воркер бесконечно (Фаза 0, issue #1; было 120 по умолчанию).
+          printf 'ai_timeout = %s\n' "$${CONFIG_AI_TIMEOUT:-90}"
           printf '\n[github]\n'
           printf 'deployment_type = "app"\n'
           printf 'app_id = "%s"\n' "$$GITHUB_APP_ID"
@@ -70,3 +77,13 @@ services:
           pr_agent.servers.github_app:app
     expose:
       - "3000"
+    # Liveness-проба (Фаза 0, issue #1). Dokploy работает поверх Docker Swarm —
+    # нездоровая задача пересоздаётся. ВНИМАНИЕ: TCP-проба ловит только полную
+    # смерть процесса; логически зависший LLM-вызов она НЕ видит (сокет жив) —
+    # это задача reconciliation sweeper из Фазы 3.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 3000), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
