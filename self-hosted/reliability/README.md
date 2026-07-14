@@ -81,6 +81,7 @@ reconcile-enqueue с `force` (доверяет GitHub-истине, а не stor
 
 - **Фаза 2:** durable queue (`queue.py`) ✅ → worker loop + per-task таймаут (СТ-14..18) — следующий срез; затем split ingress→queue→worker.
 - Добить СТ-16 (атомарный claim + upsert-публикатор СТ-25), обогащение head_sha.
+- Ретеншн `queue.partition_service` (растёт по числу репозиториев — очистка/prune на масштабе).
 - LLM Gateway (СТ-19..24), полная observability/алерты (СТ-33..35) — Фазы 3–4.
 
 > Note: SQLite-очередь durable в пределах одного узла Dokploy. Несколько узлов
