@@ -92,6 +92,7 @@ class StateStore:
                 cycles       INTEGER NOT NULL DEFAULT 0,
                 updated_at   REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS seq (id INTEGER PRIMARY KEY AUTOINCREMENT);
             """
         )
         self._db.commit()
@@ -200,3 +201,9 @@ class StateStore:
         """Эффект подтверждён — обнулить счётчик (СТ-29)."""
         self._db.execute("DELETE FROM reconcile WHERE business_key=?", (business_key,))
         self._db.commit()
+
+    def next_seq(self) -> int:
+        """Монотонный ID, не повторяющийся даже после сбросов (для reconcile-id)."""
+        cur = self._db.execute("INSERT INTO seq DEFAULT VALUES")
+        self._db.commit()
+        return int(cur.lastrowid)

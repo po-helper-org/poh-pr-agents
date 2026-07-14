@@ -50,24 +50,42 @@ class TestSweep(unittest.TestCase):
                      commands=["/review"], stale_deadline=stale_deadline,
                      max_attempts=max_attempts, max_cycles=max_cycles)
 
-    def _stuck(self, did="d1", attempts=0):
+    def _stuck(self, did="d1", attempts=0, failed=False):
         e = make_event(did)
         self.store.record_received(e)
         self.store.transition(did, State.QUEUED)
         self.store.transition(did, State.PROCESSING)
+        if failed:
+            self.store.transition(did, State.FAILED)
         for _ in range(attempts):
             self.store.increment_attempt(did)
         self.clock.t += 1000  # старше deadline
 
-    # СТ-13: застрявшее ниже порога → свежий retry
+    # СТ-13: застрявшее (PROCESSING) ниже порога → claim в очередь + повтор
     def test_stale_below_max_requeues(self):
         self._stuck(attempts=0)
         rep = self._sweep(max_attempts=5)
-        self.assertEqual(self.store.state_of("d1"), State.FAILED)
+        self.assertEqual(self.store.state_of("d1"), State.QUEUED)  # переиспользуем строку
         self.assertEqual(len(rep.requeued), 1)
         event, force = self.enq.calls[0]
-        self.assertEqual(event.command, "/review")
+        self.assertEqual(event.delivery_id, "d1")  # та же строка, не орфан
         self.assertFalse(force)
+        self.assertEqual(metrics.get("reconcile_requeues"), 1)
+
+    # СТ-13 регресс: застрявшее в FAILED ниже порога — НЕ падает, идёт в очередь
+    def test_stale_failed_below_max_requeues(self):
+        self._stuck(attempts=0, failed=True)
+        rep = self._sweep(max_attempts=5)
+        self.assertEqual(self.store.state_of("d1"), State.QUEUED)
+        self.assertEqual(len(rep.requeued), 1)
+
+    # СТ-13 регресс: застрявшее в FAILED на пороге → dead-letter (не крэш)
+    def test_stale_failed_at_max_dead_letters(self):
+        self._stuck(attempts=5, failed=True)
+        rep = self._sweep(max_attempts=5)
+        self.assertEqual(self.store.state_of("d1"), State.DEAD_LETTER)
+        self.assertEqual(len(rep.dead_lettered), 1)
+        self.assertEqual(metrics.get("dead_letter_total"), 1)
 
     # СТ-13: застрявшее на пороге → dead-letter + коммент + метрика
     def test_stale_at_max_dead_letters(self):

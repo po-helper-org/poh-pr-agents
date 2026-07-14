@@ -35,6 +35,20 @@ def _drive_to_done(store: StateStore, delivery_id: str) -> None:
             store.transition(delivery_id, target)
 
 
+def _ensure_processing(store: StateStore, delivery_id: str) -> None:
+    """Драйв в PROCESSING из любого стартового состояния (RECEIVED/QUEUED/FAILED).
+
+    Позволяет свиперу переиспользовать ту же строку при requeue — без орфанов и
+    без IllegalTransition на не-RECEIVED входе.
+    """
+    cur = store.state_of(delivery_id)
+    if cur == State.PROCESSING:
+        return
+    if cur in (State.RECEIVED, State.FAILED):
+        store.transition(delivery_id, State.QUEUED)
+    store.transition(delivery_id, State.PROCESSING)
+
+
 def process(event: Event, analyze: Analyze, store: StateStore,
             client: GitHubClient, *, max_attempts: int = 5, force: bool = False) -> Result:
     # СТ-16: та же работа уже сделана другим delivery. force=True — reconcile
@@ -44,8 +58,7 @@ def process(event: Event, analyze: Analyze, store: StateStore,
         row = store.get(event.delivery_id)
         return Result(State.DONE, int(row["attempts"]) if row else 0, notified=False, skipped=True)
 
-    store.transition(event.delivery_id, State.QUEUED)
-    store.transition(event.delivery_id, State.PROCESSING)
+    _ensure_processing(store, event.delivery_id)
     attempts = store.increment_attempt(event.delivery_id)
 
     try:

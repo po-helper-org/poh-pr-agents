@@ -58,22 +58,31 @@ def sweep(store: StateStore, *,
           max_cycles: int) -> SweepReport:
     rep = SweepReport()
 
-    # 1) СТ-13: застрявшие вне терминала — не реанимируем строку, а заводим свежую
+    # 1) СТ-13: застрявшие вне терминала. FAILED — тоже не терминал и попадает сюда,
+    # поэтому переходы делаем с учётом текущего состояния (без FAILED->FAILED).
     for row in store.stale(stale_deadline):
         did = row["delivery_id"]
         attempts = int(row["attempts"])
-        store.transition(did, State.FAILED)  # RECEIVED/QUEUED/PROCESSING -> FAILED легально
+        cur = State(row["state"])
         if attempts >= max_attempts:
-            store.transition(did, State.DEAD_LETTER)
+            if cur != State.FAILED:
+                store.transition(did, State.FAILED)
+            store.transition(did, State.DEAD_LETTER)  # довести до терминала
             metrics.incr("dead_letter_total")
             notify_failure(client, _event_from_row(row, did, row["event_type"]),
                            StuckTimeout("stuck beyond deadline"), attempts, escalated=True)
             rep.dead_lettered.append(did)
         else:
-            retry = _event_from_row(row, f"retry:{did}:{attempts}", "retry")
-            if store.record_received(retry):
-                enqueue(retry)  # обычный путь: already_done корректно отразит эффект
-                rep.requeued.append(retry.delivery_id)
+            # claim: вернуть ту же строку в очередь легальными переходами (обновляет
+            # timestamp → покидает stale-выборку), затем повторно обработать её же.
+            if cur == State.PROCESSING:
+                store.transition(did, State.FAILED)
+                cur = State.FAILED
+            if cur in (State.RECEIVED, State.FAILED):
+                store.transition(did, State.QUEUED)
+            enqueue(_event_from_row(row, did, row["event_type"]))
+            metrics.incr("reconcile_requeues")
+            rep.requeued.append(did)
 
     # 2) СТ-29/31: открытые PR без подтверждённого ревью → reconcile
     for pr in list_open_prs():
@@ -94,12 +103,14 @@ def sweep(store: StateStore, *,
                         f"({max_cycles} циклов). Требуется ручной запуск: `{cmd}`.")
                     rep.escalated.append(bkey)
                 continue
-            # reconcile-событие с force: GitHub — истина, обходим already_done
-            rec = Event(delivery_id=f"reconcile:{bkey}:{cycles}", repo=pr.repo,
+            # reconcile-событие с force: GitHub — истина, обходим already_done.
+            # id на монотонном seq — не коллизится при флапе has_completed_review.
+            rec = Event(delivery_id=f"reconcile:{bkey}:{store.next_seq()}", repo=pr.repo,
                         number=pr.number, head_sha=pr.head_sha, command=cmd,
                         event_type="reconcile")
             if store.record_received(rec):
                 enqueue(rec, force=True)
+                metrics.incr("reconcile_requeues")
                 rep.reconciled.append(bkey)
 
     return rep
