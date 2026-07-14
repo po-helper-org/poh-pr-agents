@@ -20,6 +20,7 @@
 | `analyze_adapter.py` | — | запуск анализа pr-agent + токен; реальные обёртки — на деплое |
 | `metrics.py` | СТ-27б | счётчики (`dead_letter_total`, `reconcile_escalated_total`) |
 | `sweeper.py` | СТ-13, 29..32 | **reconciliation**: застрявшие→retry/dead-letter, PR без ревью→reconcile, эскалация |
+| `queue.py` | СТ-6..9 | **durable queue**: at-least-once, visibility-timeout redelivery, DLQ, честность по партициям |
 
 ## Запуск тестов
 
@@ -78,6 +79,10 @@ reconcile-enqueue с `force` (доверяет GitHub-истине, а не stor
 
 ## Дальше по фазам
 
-- Durable queue + split ingress/worker (СТ-6..9, 14..18) — Фаза 2.
-- Добить СТ-16 (атомарный claim + upsert-публикатор СТ-25), СТ-14 (per-task таймаут), обогащение head_sha.
+- **Фаза 2:** durable queue (`queue.py`) ✅ → worker loop + per-task таймаут (СТ-14..18) — следующий срез; затем split ingress→queue→worker.
+- Добить СТ-16 (атомарный claim + upsert-публикатор СТ-25), обогащение head_sha.
 - LLM Gateway (СТ-19..24), полная observability/алерты (СТ-33..35) — Фазы 3–4.
+
+> Note: SQLite-очередь durable в пределах одного узла Dokploy. Несколько узлов
+> одновременно — заменить реализацию на Redis/RabbitMQ за тем же интерфейсом
+> (`enqueue`/`lease`/`ack`/`nack`).
