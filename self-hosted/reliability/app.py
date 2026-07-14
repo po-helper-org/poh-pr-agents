@@ -6,17 +6,15 @@
 """
 from __future__ import annotations
 
-import json
 import os
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 from reliability import analyze_adapter
 from reliability.github_client import GitHubAppClient
-from reliability.security import verify_signature
+from reliability.ingress import handle_webhook
 from reliability.state import StateStore
 from reliability.supervisor import process
-from reliability.webhook import parse_events
 
 WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 STORE_PATH = os.environ.get("RELIABILITY_DB", "/data/reliability.db")
@@ -35,13 +33,13 @@ def health():
 @app.post("/webhook")
 async def webhook(request: Request, bg: BackgroundTasks):
     raw = await request.body()
-    if not verify_signature(WEBHOOK_SECRET, raw, request.headers.get("X-Hub-Signature-256")):
-        return Response(status_code=401)  # СТ-1
-    delivery = request.headers.get("X-GitHub-Delivery", "")
-    etype = request.headers.get("X-GitHub-Event", "")
-    payload = json.loads(raw or b"{}")
-    for event in parse_events(etype, delivery, payload):
-        if _store.record_received(event):  # СТ-2 dedup
-            bg.add_task(process, event, analyze_adapter.run, _store, _client,
-                        max_attempts=MAX_ATTEMPTS)
+
+    def schedule(event):
+        bg.add_task(process, event, analyze_adapter.run, _store, _client,
+                    max_attempts=MAX_ATTEMPTS)
+
+    status = handle_webhook(raw, dict(request.headers),
+                            secret=WEBHOOK_SECRET, store=_store, schedule=schedule)
+    if status != 200:
+        return Response(status_code=status)
     return {}  # СТ-4: быстрый 200, работа в фоне

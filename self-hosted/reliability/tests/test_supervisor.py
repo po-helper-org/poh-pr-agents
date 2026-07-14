@@ -1,6 +1,7 @@
 """СТ-14..16, 27: оркестрация обработки события супервизором."""
 import unittest
 
+from reliability import metrics
 from reliability.state import Event, State, StateStore
 from reliability.supervisor import process
 
@@ -31,6 +32,7 @@ class TestProcess(unittest.TestCase):
     def setUp(self):
         self.store = StateStore(":memory:")
         self.client = FakeClient()
+        metrics.reset()
 
     def test_success_marks_done_without_comment(self):
         e = ev()
@@ -61,6 +63,17 @@ class TestProcess(unittest.TestCase):
         self.assertEqual((repo, number), ("o/r", 7))
         self.assertIn("RuntimeError", body)
         self.assertIn("dead-letter", body)
+        self.assertEqual(metrics.get("dead_letter_total"), 1)  # СТ-27(б)
+
+    def test_base_exception_propagates_without_comment(self):
+        # отмена/сигнал (KeyboardInterrupt — BaseException, не Exception) не глотаем
+        e = ev()
+        self.store.record_received(e)
+        a = FakeAnalyze(exc=KeyboardInterrupt())
+        with self.assertRaises(KeyboardInterrupt):
+            process(e, a, self.store, self.client, max_attempts=1)
+        self.assertEqual(self.client.calls, [])          # не постим при отмене
+        self.assertEqual(metrics.get("dead_letter_total"), 0)
 
     def test_already_done_business_key_skips_analysis(self):
         # первый delivery делает работу

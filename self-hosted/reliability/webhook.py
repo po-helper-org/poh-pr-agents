@@ -17,10 +17,12 @@ def parse_events(event_type: str, delivery_id: str, payload: dict,
     if event_type == "pull_request":
         if payload.get("action") not in PR_TRIGGER_ACTIONS:
             return []
-        pr = payload["pull_request"]
-        repo = payload["repository"]["full_name"]
-        number = pr["number"]
-        head_sha = pr["head"]["sha"]
+        pr = payload.get("pull_request") or {}
+        repo = (payload.get("repository") or {}).get("full_name")
+        number = pr.get("number")
+        head_sha = (pr.get("head") or {}).get("sha")
+        if not (repo and number is not None and head_sha):
+            return []  # неполный payload — не выдумываем событие
         return [
             Event(delivery_id=f"{delivery_id}:{cmd}", repo=repo, number=number,
                   head_sha=head_sha, command=cmd, event_type=event_type)
@@ -34,8 +36,10 @@ def parse_events(event_type: str, delivery_id: str, payload: dict,
         if not body.startswith("/"):
             return []
         cmd = body.split()[0]
-        repo = payload["repository"]["full_name"]
-        number = payload["issue"]["number"]
+        repo = (payload.get("repository") or {}).get("full_name")
+        number = (payload.get("issue") or {}).get("number")
+        if not (repo and number is not None):
+            return []
         # head_sha из payload issue_comment недоступен напрямую — обогащается на
         # следующем шаге (запрос PR по номеру); пока пусто (см. issue #1).
         head_sha = payload.get("_head_sha", "")

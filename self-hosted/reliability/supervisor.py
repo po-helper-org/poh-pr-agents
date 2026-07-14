@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from reliability import metrics
 from reliability.notifier import GitHubClient, notify_failure
 from reliability.state import Event, State, StateStore
 
@@ -48,11 +49,12 @@ def process(event: Event, analyze: Analyze, store: StateStore,
 
     try:
         analyze(event)
-    except BaseException as err:  # noqa: BLE001 — любой сбой обязан быть виден
+    except Exception as err:  # доменные сбои; BaseException (отмена/сигналы) — наверх
         store.transition(event.delivery_id, State.FAILED)
         if attempts >= max_attempts:
             store.transition(event.delivery_id, State.DEAD_LETTER)
-            notify_failure(client, event, err, attempts, escalated=True)  # СТ-27
+            metrics.incr("dead_letter_total")  # СТ-27(б)
+            notify_failure(client, event, err, attempts, escalated=True)  # СТ-27(а)
             return Result(State.DEAD_LETTER, attempts, notified=True)
         return Result(State.FAILED, attempts, notified=False)
 
