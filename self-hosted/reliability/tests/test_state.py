@@ -1,5 +1,6 @@
 """СТ-2, 10, 11, 12, 13, 16, 28: машина состояний и идемпотентность."""
 import unittest
+from unittest import mock
 
 from reliability.state import (
     Event,
@@ -71,6 +72,23 @@ class TestStateStore(unittest.TestCase):
         self.store.record_received(make_event())
         self.assertEqual(self.store.increment_attempt("d1"), 1)
         self.assertEqual(self.store.increment_attempt("d1"), 2)
+
+    def test_increment_attempt_unknown_raises(self):
+        with self.assertRaises(KeyError):
+            self.store.increment_attempt("nope")
+
+    # СТ-10/17: CAS-защита transition от гонки (устаревшее чтение состояния)
+    def test_transition_cas_rejects_stale_view(self):
+        self.store.record_received(make_event())
+        self.store.transition("d1", State.QUEUED)
+        self.store.transition("d1", State.PROCESSING)
+        self.store.transition("d1", State.DONE)  # реальное состояние в БД = done
+        # смоделировать устаревшее чтение: get вернёт processing, а в БД уже done
+        stale = {"state": State.PROCESSING.value}
+        with mock.patch.object(self.store, "get", return_value=stale):
+            with self.assertRaises(IllegalTransition):
+                self.store.transition("d1", State.FAILED)  # CAS не найдёт processing
+        self.assertEqual(self.store.state_of("d1"), State.DONE)  # состояние не испорчено
 
     # СТ-16: идемпотентный эффект по бизнес-ключу
     def test_already_done_by_business_key(self):

@@ -59,8 +59,13 @@ class Event:
 
 class StateStore:
     def __init__(self, path: str = ":memory:", clock: Callable[[], float] = time.time):
-        self._db = sqlite3.connect(path)
+        # check_same_thread=False + WAL + busy_timeout — готовность к worker pool
+        # (СТ-5/14/17). Для реального многопроцессного доступа нужен файловый путь
+        # (или Postgres); :memory: остаётся однопроцессным.
+        self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA busy_timeout=5000")
+        self._db.execute("PRAGMA journal_mode=WAL")
         self._clock = clock
         self._init_schema()
 
@@ -119,14 +124,22 @@ class StateStore:
         cur = State(row["state"])
         if to not in _ALLOWED[cur]:
             raise IllegalTransition(f"{cur.value} -> {to.value}")
-        self._db.execute(
-            "UPDATE events SET state=?, updated_at=? WHERE delivery_id=?",
-            (to.value, self._clock(), delivery_id),
-        )
+        # CAS: пишем только если состояние не изменилось конкурентно между чтением
+        # и записью (защита от lost-update при worker pool + sweeper, СТ-10/17).
+        updated = self._db.execute(
+            "UPDATE events SET state=?, updated_at=? WHERE delivery_id=? AND state=?",
+            (to.value, self._clock(), delivery_id, cur.value),
+        ).rowcount
         self._db.commit()
+        if updated == 0:
+            raise IllegalTransition(
+                f"concurrent state change on {delivery_id}: expected {cur.value}"
+            )
 
     def increment_attempt(self, delivery_id: str) -> int:
         """СТ-12: учёт попыток (для backoff и порога dead-letter)."""
+        if self.get(delivery_id) is None:
+            raise KeyError(delivery_id)
         self._db.execute(
             "UPDATE events SET attempts=attempts+1, updated_at=? WHERE delivery_id=?",
             (self._clock(), delivery_id),
