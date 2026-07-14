@@ -1,0 +1,111 @@
+"""Worker (СТ-14..18): lease → process с per-task таймаутом → ack/nack.
+
+Ретрай и DLQ — на очереди. Успех → ack; сбой/таймаут → nack (очередь повторит
+с backoff или уведёт в dead-letter по исчерпании выдач). При dead-letter воркер
+доводит событие до терминала, постит видимый коммент в PR (СТ-27) и метрику.
+Механизм таймаута инъектируется (`run_fn`) → логика тестируется без потоков/времени.
+"""
+from __future__ import annotations
+
+import time
+from typing import Callable, Optional
+
+from reliability import metrics
+from reliability.notifier import GitHubClient, notify_failure
+from reliability.queue import DurableQueue, Lease
+from reliability.state import State, StateStore, event_from_dict
+from reliability.supervisor import process
+
+
+class TaskTimeout(Exception):
+    """Обработка превысила per-task таймаут (СТ-14)."""
+
+
+def run_with_timeout(fn: Callable, timeout: float):  # pragma: no cover - реальные потоки
+    import threading
+
+    box: dict = {}
+
+    def target():
+        try:
+            box["v"] = fn()
+        except BaseException as e:  # noqa: BLE001 — пробрасываем через box
+            box["e"] = e
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TaskTimeout("task exceeded timeout")  # осиротевший поток завершится сам
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _drive_to_dead_letter(store: StateStore, delivery_id: str) -> None:
+    cur = store.state_of(delivery_id)
+    if cur in (State.DONE, State.DEAD_LETTER, None):
+        return
+    if cur != State.FAILED:
+        store.transition(delivery_id, State.FAILED)
+    store.transition(delivery_id, State.DEAD_LETTER)
+
+
+def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
+                 client: GitHubClient, analyze, run_fn=run_with_timeout,
+                 task_timeout: float = 90, max_attempts: int = 5, backoff: float = 0) -> str:
+    event = event_from_dict(lease.payload)
+    force = event.event_type == "reconcile"
+    reason: Optional[str] = None
+    try:
+        result = run_fn(lambda: process(event, analyze, store, force=force), task_timeout)
+        if result.state == State.DONE:
+            queue.ack(lease.id, lease.token)
+            metrics.incr("processed_ok")
+            return "ack"
+        reason = "analysis_failed"
+    except Exception as err:  # таймаут или неожиданная ошибка обработки
+        reason = type(err).__name__
+
+    outcome = queue.nack(lease.id, lease.token, max_attempts=max_attempts,
+                         backoff=backoff, reason=reason)
+    if outcome == "dead_letter":  # исчерпаны выдачи → эскалация (СТ-27)
+        _drive_to_dead_letter(store, event.delivery_id)
+        metrics.incr("dead_letter_total")
+        notify_failure(client, event, RuntimeError(reason), lease.attempts, escalated=True)
+    return outcome
+
+
+def run_once(queue: DurableQueue, *, store: StateStore, client: GitHubClient, analyze,
+             visibility_timeout: float = 120, task_timeout: float = 90,
+             max_attempts: int = 5, backoff: float = 0) -> bool:
+    """Обработать одно сообщение; False если очередь пуста."""
+    lease = queue.lease(visibility_timeout=visibility_timeout, max_attempts=max_attempts)
+    if lease is None:
+        return False
+    handle_lease(lease, queue=queue, store=store, client=client, analyze=analyze,
+                 task_timeout=task_timeout, max_attempts=max_attempts, backoff=backoff)
+    return True
+
+
+def run_forever(queue, *, store, client, analyze, idle_sleep=1.0, **kw):  # pragma: no cover
+    while True:
+        if not run_once(queue, store=store, client=client, analyze=analyze, **kw):
+            time.sleep(idle_sleep)
+
+
+def main():  # pragma: no cover - deploy entrypoint (отдельный процесс воркера)
+    import os
+
+    from reliability import analyze_adapter
+    from reliability.github_client import GitHubAppClient
+
+    store = StateStore(os.environ.get("RELIABILITY_DB", "/data/reliability.db"))
+    queue = DurableQueue(os.environ.get("RELIABILITY_QUEUE", "/data/queue.db"))
+    client = GitHubAppClient(token_provider=analyze_adapter.installation_token)
+    run_forever(queue, store=store, client=client, analyze=analyze_adapter.run,
+                max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

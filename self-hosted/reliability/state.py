@@ -8,7 +8,7 @@ from __future__ import annotations
 import enum
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Callable, Optional
 
 
@@ -55,6 +55,17 @@ class Event:
         Новый пуш (иной head_sha) даёт иной ключ → ревью не дедупится, что верно.
         """
         return f"{self.repo}#{self.number}@{self.head_sha}:{self.command}"
+
+
+def event_to_dict(event: "Event") -> dict:
+    """Сериализация Event в payload очереди (СТ-8)."""
+    return asdict(event)
+
+
+def event_from_dict(d: dict) -> "Event":
+    return Event(delivery_id=d["delivery_id"], repo=d["repo"], number=int(d["number"]),
+                 head_sha=d["head_sha"], command=d["command"],
+                 event_type=d.get("event_type", "pull_request"))
 
 
 class StateStore:

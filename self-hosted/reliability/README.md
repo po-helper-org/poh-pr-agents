@@ -20,7 +20,8 @@
 | `analyze_adapter.py` | — | запуск анализа pr-agent + токен; реальные обёртки — на деплое |
 | `metrics.py` | СТ-27б | счётчики (`dead_letter_total`, `reconcile_escalated_total`) |
 | `sweeper.py` | СТ-13, 29..32 | **reconciliation**: застрявшие→retry/dead-letter, PR без ревью→reconcile, эскалация |
-| `queue.py` | СТ-6..9 | **durable queue**: at-least-once, visibility-timeout redelivery, DLQ, честность по партициям |
+| `queue.py` | СТ-6..9 | **durable queue**: at-least-once, visibility-timeout redelivery, DLQ, фенсинг, честность по партициям |
+| `worker.py` | СТ-14..18 | **worker loop**: lease→process(per-task таймаут)→ack/nack; при DLQ — коммент в PR (СТ-27) |
 
 ## Запуск тестов
 
@@ -43,10 +44,12 @@ Ingress заменяет webhook-вход pr-agent и вызывает его а
 видеть исход. Нужно:
 
 1. Образ содержит и pr-agent, и пакет `reliability` (тот же контейнер).
-2. Entrypoint запускает `reliability.app:app` (uvicorn) вместо `pr_agent.servers.github_app:app`.
+2. **Два процесса** на общих SQLite-файлах (volume):
+   - ingress: `reliability.app:app` (uvicorn) вместо `pr_agent.servers.github_app:app`;
+   - worker: `python -m reliability.worker` (`main()` → `run_forever`).
 3. Env: `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_B64` (уже есть),
-   `RELIABILITY_DB` (путь SQLite на volume), `RELIABILITY_MAX_ATTEMPTS`.
-4. Webhook GitHub App → `/webhook`; healthcheck → `/health`.
+   `RELIABILITY_DB` + `RELIABILITY_QUEUE` (пути SQLite на volume), `RELIABILITY_MAX_ATTEMPTS`.
+4. Webhook GitHub App → `/webhook`; healthcheck → `/health`. Периодический запуск свипера — крон/loop.
 
 ⚠️ Живой прогон меняет поведение контейнера — применяйте на тесте до прод-переключения.
 `docker-compose.yml` намеренно НЕ тронут; переключение entrypoint — отдельный
@@ -79,8 +82,12 @@ reconcile-enqueue с `force` (доверяет GitHub-истине, а не stor
 
 ## Дальше по фазам
 
-- **Фаза 2:** durable queue (`queue.py`) ✅ → worker loop + per-task таймаут (СТ-14..18) — следующий срез; затем split ingress→queue→worker.
+- **Фаза 2 закрыта (логика):** durable queue ✅ + worker/split ✅. Поток теперь
+  `ingress (app.py) → queue → worker (process с таймаутом) → ack/nack`; ретрай/DLQ
+  на очереди, эскалация (коммент в PR) — воркером при исчерпании выдач.
 - Добить СТ-16 (атомарный claim + upsert-публикатор СТ-25), обогащение head_sha.
+- Консолидация слоёв ретрая: убрать пересечение sweeper-stale ↔ queue-redelivery
+  (после split часть страховок sweeper дублирует visibility-timeout очереди).
 - Ретеншн `queue.partition_service` (растёт по числу репозиториев — очистка/prune на масштабе).
 - LLM Gateway (СТ-19..24), полная observability/алерты (СТ-33..35) — Фазы 3–4.
 
