@@ -12,7 +12,7 @@
 | `state.py` | СТ-2, 10, 11, 12, 13, 16, 28 | dedup по `delivery_id`, машина состояний (CAS), идемпотентный эффект, учёт попыток, детект «застрявших» |
 | `notifier.py` | СТ-27 | текст видимого комментария о провале в PR |
 | `webhook.py` | СТ-8 | разбор payload → `Event` (PR-события, slash-команды) |
-| `github_client.py` | СТ-27 | публикация комментария (инъект токен/транспорт, zero-dep) |
+| `github_client.py` | СТ-25,27 | **идемпотентная публикация** (upsert по маркеру: правит бот-коммент, а не плодит дубли) |
 | `supervisor.py` | СТ-14..16, 27 | оркестрация: success/fail/dead-letter → **коммент в PR при провале** |
 | `ingress.py` | СТ-1,2,4 | приём webhook: подпись, dedup, устойчивость к битому payload |
 | `app.py` | СТ-3,5 | FastAPI-обвязка над `ingress` |
@@ -85,7 +85,7 @@ reconcile-enqueue с `force` (доверяет GitHub-истине, а не stor
 - **Фаза 2 закрыта (логика):** durable queue ✅ + worker/split ✅. Поток теперь
   `ingress (app.py) → queue → worker (process с таймаутом) → ack/nack`; ретрай/DLQ
   на очереди, эскалация (коммент в PR) — воркером при исчерпании выдач.
-- Добить СТ-16 (атомарный claim + upsert-публикатор СТ-25), обогащение head_sha.
+- Добить СТ-16 (атомарный claim; upsert-публикатор СТ-25 ✅ — комменты идемпотентны), обогащение head_sha.
 - Консолидация слоёв ретрая: убрать пересечение sweeper-stale ↔ queue-redelivery
   (после split часть страховок sweeper дублирует visibility-timeout очереди).
 - Наблюдаемость poison-guard: DLQ на `lease` (повторные краши без nack) сейчас

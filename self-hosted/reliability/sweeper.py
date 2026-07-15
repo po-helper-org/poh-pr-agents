@@ -97,8 +97,8 @@ def sweep(store: StateStore, *,
             if cycles > max_cycles:            # СТ-32: эскалация
                 if cycles == max_cycles + 1:   # оповещаем один раз, дальше молча стоп
                     metrics.incr("reconcile_escalated_total")
-                    client.post_issue_comment(
-                        pr.repo, pr.number,
+                    client.upsert_comment(
+                        pr.repo, pr.number, f"<!-- reliability:reconcile:{cmd} -->",
                         f"⚠️ Автоматические попытки получить `{cmd}` исчерпаны "
                         f"({max_cycles} циклов). Требуется ручной запуск: `{cmd}`.")
                     rep.escalated.append(bkey)

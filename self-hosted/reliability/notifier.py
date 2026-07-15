@@ -10,7 +10,7 @@ from typing import Protocol
 
 
 class GitHubClient(Protocol):
-    def post_issue_comment(self, repo: str, number: int, body: str) -> None: ...
+    def upsert_comment(self, repo: str, number: int, marker: str, body: str) -> None: ...
 
 
 def build_failure_comment(command: str, error_class: str, attempts: int, escalated: bool) -> str:
@@ -28,7 +28,11 @@ def build_failure_comment(command: str, error_class: str, attempts: int, escalat
 
 
 def notify_failure(client: GitHubClient, event, error: BaseException, attempts: int, escalated: bool) -> str:
-    """Публикует комментарий о провале и возвращает его тело (для лога/теста)."""
+    """Идемпотентно публикует комментарий о провале (СТ-25 upsert) и возвращает тело.
+
+    Один коммент на (PR, команда): ретраи/reconcile правят его, а не плодят дубли.
+    """
     body = build_failure_comment(event.command, type(error).__name__, attempts, escalated)
-    client.post_issue_comment(event.repo, event.number, body)
+    marker = f"<!-- reliability:failure:{event.command} -->"
+    client.upsert_comment(event.repo, event.number, marker, body)
     return body

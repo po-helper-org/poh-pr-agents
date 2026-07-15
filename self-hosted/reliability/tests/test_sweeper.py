@@ -18,8 +18,8 @@ class FakeClient:
     def __init__(self):
         self.calls = []
 
-    def post_issue_comment(self, repo, number, body):
-        self.calls.append((repo, number, body))
+    def upsert_comment(self, repo, number, marker, body):
+        self.calls.append((repo, number, marker, body))
 
 
 class Enq:

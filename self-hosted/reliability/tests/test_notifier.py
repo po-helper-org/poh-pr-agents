@@ -9,8 +9,8 @@ class FakeClient:
     def __init__(self):
         self.calls = []
 
-    def post_issue_comment(self, repo, number, body):
-        self.calls.append((repo, number, body))
+    def upsert_comment(self, repo, number, marker, body):
+        self.calls.append((repo, number, marker, body))
 
 
 def make_event():
@@ -35,8 +35,9 @@ class TestFailureComment(unittest.TestCase):
         err = TimeoutError("upstream stalled")
         body = notify_failure(client, make_event(), err, attempts=3, escalated=True)
         self.assertEqual(len(client.calls), 1)
-        repo, number, posted = client.calls[0]
+        repo, number, marker, posted = client.calls[0]
         self.assertEqual((repo, number), ("o/r", 7))
+        self.assertIn("/review", marker)      # маркер per-command
         self.assertEqual(posted, body)
         self.assertIn("TimeoutError", posted)
 
