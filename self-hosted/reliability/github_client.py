@@ -57,6 +57,21 @@ class GitHubAppClient:
                 return found
             page += 1
 
+    def list_open_pulls(self, repo: str) -> list:
+        """Открытые PR репозитория (по всем страницам) — для reconciliation sweeper."""
+        out, page = [], 1
+        while True:
+            s, b = self._transport(
+                "GET", f"{self._api}/repos/{repo}/pulls?state=open&per_page=100&page={page}",
+                None, self._headers(repo))
+            if s >= 300:
+                raise RuntimeError(f"list pulls {s}: {b[:200]!r}")
+            items = json.loads(b)
+            out.extend(items)
+            if len(items) < 100:
+                return out
+            page += 1
+
     def upsert_comment(self, repo: str, number: int, marker: str, body: str) -> None:
         """СТ-25: правит существующий бот-коммент с маркером, иначе создаёт новый.
         Лишние дубликаты (от гонок) схлопывает — идемпотентность самовосстанавливается."""

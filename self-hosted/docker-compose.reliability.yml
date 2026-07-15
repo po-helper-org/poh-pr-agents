@@ -1,0 +1,76 @@
+# Self-hosted reliability-обвязка (go-live, Фаза A) — три процесса поверх pr-agent.
+#
+# ⚠️ ОТДЕЛЬНО от docker-compose.yml: текущий прод НЕ меняется. Переключение —
+# осознанный шаг (развернуть этот compose вместо/рядом, перенаправить webhook).
+#
+# Предусловие: `docker compose -f docker-compose.yml build` (создаёт базу
+# pr-agent-github-app:local). Затем: `docker compose -f docker-compose.reliability.yml up -d`.
+#
+# Потоки:
+#   ingress  — принимает webhook, кладёт в durable queue (порт 3000, /webhook, /health)
+#   worker   — разбирает очередь, гоняет pr-agent, при сбое — коммент в PR
+#   sweeper  — периодически дозапускает пропущенное/застрявшее
+# Все три делят том с SQLite (state + queue).
+#
+# ⚠️ Проверяется на живом смоуке — см. reliability/README.md (Deploy-чеклист).
+
+x-reliability-env: &reliability-env
+  OPENAI_KEY: "${OPENAI_KEY}"
+  OPENAI_API_BASE: "${OPENAI_API_BASE:-}"
+  CONFIG_MODEL: "${CONFIG_MODEL:-}"
+  CONFIG_MAX_TOKENS: "${CONFIG_MAX_TOKENS:-}"
+  CONFIG_AI_TIMEOUT: "${CONFIG_AI_TIMEOUT:-90}"
+  GITHUB_APP_ID: "${GITHUB_APP_ID}"
+  GITHUB_WEBHOOK_SECRET: "${GITHUB_WEBHOOK_SECRET}"
+  GITHUB_PRIVATE_KEY_B64: "${GITHUB_PRIVATE_KEY_B64}"
+  RELIABILITY_DB: "/data/reliability.db"
+  RELIABILITY_QUEUE: "/data/queue.db"
+  RELIABILITY_MAX_ATTEMPTS: "${RELIABILITY_MAX_ATTEMPTS:-5}"
+
+services:
+  ingress:
+    build:
+      context: .
+      dockerfile: Dockerfile.reliability
+    image: pr-agent-reliability:local
+    restart: unless-stopped
+    environment: *reliability-env
+    command: ["uvicorn", "reliability.app:app", "--host", "0.0.0.0", "--port", "3000"]
+    volumes:
+      - reliability-data:/data
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 3000), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    image: pr-agent-reliability:local
+    restart: unless-stopped
+    depends_on:
+      - ingress            # чтобы образ собрался сервисом ingress
+    environment: *reliability-env
+    command: ["python", "-m", "reliability.worker"]
+    volumes:
+      - reliability-data:/data
+
+  sweeper:
+    image: pr-agent-reliability:local
+    restart: unless-stopped
+    depends_on:
+      - ingress
+    environment:
+      <<: *reliability-env
+      RELIABILITY_REPOS: "${RELIABILITY_REPOS}"                      # "owner/repo,owner/repo2"
+      RELIABILITY_COMMANDS: "${RELIABILITY_COMMANDS:-/describe,/review}"
+      RELIABILITY_SWEEP_INTERVAL: "${RELIABILITY_SWEEP_INTERVAL:-300}"
+      RELIABILITY_STALE_DEADLINE: "${RELIABILITY_STALE_DEADLINE:-1800}"
+    command: ["python", "-m", "reliability.sweeper_runner"]
+    volumes:
+      - reliability-data:/data
+
+volumes:
+  reliability-data:

@@ -1,0 +1,19 @@
+# Reliability-обвязка поверх УЖЕ собранного образа pr-agent (go-live, Фаза A).
+#
+# Предусловие: сначала собрать базовый образ основным compose —
+#   docker compose -f docker-compose.yml build
+# он создаёт локальный образ `pr-agent-github-app:local` с исходниками pr-agent
+# в /app/pr_agent (там же ищется .secrets.toml). Мы наследуемся от него и
+# добавляем пакет reliability + entrypoint, пишущий .secrets.toml (нужен воркеру
+# для запуска анализа pr-agent и адаптеру для минтинга токена).
+#
+# ⚠️ Проверяется на живом смоуке (сборку/запуск контейнера здесь не выполнить).
+FROM pr-agent-github-app:local
+
+COPY reliability /app/reliability
+COPY reliability-entrypoint.sh /usr/local/bin/reliability-entrypoint.sh
+RUN chmod +x /usr/local/bin/reliability-entrypoint.sh
+
+ENV PYTHONPATH=/app
+ENTRYPOINT ["/usr/local/bin/reliability-entrypoint.sh"]
+# command задаётся в docker-compose.reliability.yml (ingress / worker / sweeper)

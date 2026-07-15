@@ -22,6 +22,8 @@
 | `sweeper.py` | СТ-13, 29..32 | **reconciliation**: застрявшие→retry/dead-letter, PR без ревью→reconcile, эскалация |
 | `queue.py` | СТ-6..9 | **durable queue**: at-least-once, visibility-timeout redelivery, DLQ, фенсинг, честность по партициям |
 | `worker.py` | СТ-14..18 | **worker loop**: lease→process(per-task таймаут)→ack/nack; при DLQ — коммент в PR (СТ-27) |
+| `sweeper_adapter.py` | — | реальные порты свипера: `list_open_prs`, `has_completed_review` (через store) |
+| `sweeper_runner.py` | — | периодический раннер свипера (deploy entrypoint) |
 
 ## Запуск тестов
 
@@ -38,18 +40,25 @@ cd self-hosted && python3 -m unittest discover -s reliability/tests -t . -v
 обёртки (`_real_invoke` pr-agent, RS256-подпись, urllib) отмечены `pragma: no cover`
 и проверяются на первом деплое.
 
-## Как поднять (go live) — шаг для деплоя
+## Как поднять (go live) — артефакты и шаги
 
-Ingress заменяет webhook-вход pr-agent и вызывает его анализ как библиотеку, чтобы
-видеть исход. Нужно:
+Готовые артефакты (в `self-hosted/`, отдельно от прод-`docker-compose.yml`):
+`Dockerfile.reliability` · `reliability-entrypoint.sh` · `docker-compose.reliability.yml`.
 
-1. Образ содержит и pr-agent, и пакет `reliability` (тот же контейнер).
-2. **Два процесса** на общих SQLite-файлах (volume):
-   - ingress: `reliability.app:app` (uvicorn) вместо `pr_agent.servers.github_app:app`;
-   - worker: `python -m reliability.worker` (`main()` → `run_forever`).
-3. Env: `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_B64` (уже есть),
-   `RELIABILITY_DB` + `RELIABILITY_QUEUE` (пути SQLite на volume), `RELIABILITY_MAX_ATTEMPTS`.
-4. Webhook GitHub App → `/webhook`; healthcheck → `/health`. Периодический запуск свипера — крон/loop.
+Три процесса на общем томе с SQLite (state + queue):
+- **ingress** — `uvicorn reliability.app:app` (принимает webhook → durable queue);
+- **worker** — `python -m reliability.worker` (очередь → pr-agent → ack/nack, коммент при DLQ);
+- **sweeper** — `python -m reliability.sweeper_runner` (периодически дозапускает пропущенное/застрявшее).
+
+Шаги:
+1. `docker compose -f docker-compose.yml build` — собрать базу `pr-agent-github-app:local`.
+2. Заполнить env (та же `dokploy.env` + `RELIABILITY_REPOS="owner/repo,..."`).
+3. `docker compose -f docker-compose.reliability.yml up -d`.
+4. Webhook GitHub App → `/webhook` (ingress); healthcheck → `/health`. Обновить `origin`/webhook на новый адрес репо.
+
+⚠️ Это меняет прод-поведение — сначала стейджинг. `pragma: no cover` обёртки
+(`_real_invoke`, RS256-подпись, `make_list_open_prs`, раннеры) проверяются именно
+на этом смоуке (см. Deploy-чеклист ниже).
 
 ⚠️ Живой прогон меняет поведение контейнера — применяйте на тесте до прод-переключения.
 `docker-compose.yml` намеренно НЕ тронут; переключение entrypoint — отдельный

@@ -73,6 +73,14 @@ class TestUpsertComment(unittest.TestCase):
         client_with(t).upsert_comment("o/r", 7, MARKER, "x")
         self.assertEqual(t.methods(), ["GET", "POST"])
 
+    def test_list_open_pulls_paginates(self):
+        page1 = [{"number": i, "head": {"sha": f"s{i}"}} for i in range(100)]
+        page2 = [{"number": 100, "head": {"sha": "s100"}}]
+        t = PagingTransport([page1, page2])
+        pulls = client_with(t).list_open_pulls("o/r")
+        self.assertEqual(len(pulls), 101)
+        self.assertEqual(t.methods(), ["GET", "GET"])
+
     def test_list_error_raises(self):
         class BadGet(PagingTransport):
             def __call__(self, method, url, data, headers):
