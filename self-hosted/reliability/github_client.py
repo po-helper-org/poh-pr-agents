@@ -37,28 +37,45 @@ class GitHubAppClient:
             "User-Agent": "pr-agent-reliability",
         }
 
-    def _list_comments(self, repo: str, number: int) -> list:
-        s, b = self._transport(
-            "GET", f"{self._api}/repos/{repo}/issues/{number}/comments", None, self._headers(repo))
-        if s >= 300:
-            raise RuntimeError(f"list comments {s}: {b[:200]!r}")
-        return json.loads(b)
+    def _matching_comments(self, repo: str, number: int, marker: str) -> list:
+        """Комменты БОТА с маркером по всем страницам (пагинация — иначе на PR с
+        >30 комментами наш коммент не находится и плодится дубль). Фильтр по
+        user.type=='Bot', чтобы чужой процитированный маркер не матчился."""
+        found, page = [], 1
+        while True:
+            s, b = self._transport(
+                "GET",
+                f"{self._api}/repos/{repo}/issues/{number}/comments?per_page=100&page={page}",
+                None, self._headers(repo))
+            if s >= 300:
+                raise RuntimeError(f"list comments {s}: {b[:200]!r}")
+            items = json.loads(b)
+            for c in items:
+                if marker in (c.get("body") or "") and (c.get("user") or {}).get("type") == "Bot":
+                    found.append(c)
+            if len(items) < 100:
+                return found
+            page += 1
 
     def upsert_comment(self, repo: str, number: int, marker: str, body: str) -> None:
-        """СТ-25: правит существующий коммент с маркером, иначе создаёт новый."""
+        """СТ-25: правит существующий бот-коммент с маркером, иначе создаёт новый.
+        Лишние дубликаты (от гонок) схлопывает — идемпотентность самовосстанавливается."""
         tagged = f"{body}\n\n{marker}"
-        existing = next(
-            (c for c in self._list_comments(repo, number) if marker in (c.get("body") or "")),
-            None,
-        )
         data = json.dumps({"body": tagged}).encode()
-        if existing is not None:
-            s, b = self._transport(
-                "PATCH", f"{self._api}/repos/{repo}/issues/comments/{existing['id']}",
-                data, self._headers(repo))
-        else:
+        matches = self._matching_comments(repo, number, marker)
+        if not matches:
             s, b = self._transport(
                 "POST", f"{self._api}/repos/{repo}/issues/{number}/comments",
                 data, self._headers(repo))
+            if s >= 300:
+                raise RuntimeError(f"create comment {s}: {b[:200]!r}")
+            return
+        s, b = self._transport(
+            "PATCH", f"{self._api}/repos/{repo}/issues/comments/{matches[0]['id']}",
+            data, self._headers(repo))
         if s >= 300:
-            raise RuntimeError(f"upsert comment {s}: {b[:200]!r}")
+            raise RuntimeError(f"update comment {s}: {b[:200]!r}")
+        for extra in matches[1:]:  # self-heal: удалить дубли, оставить один
+            self._transport(
+                "DELETE", f"{self._api}/repos/{repo}/issues/comments/{extra['id']}",
+                None, self._headers(repo))
