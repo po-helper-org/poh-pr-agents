@@ -1,8 +1,12 @@
 """Reconciliation sweeper (СТ-13, 29..32): периодическая сверка и дозапуск.
 
-Настоящая гарантия «не молчать»: ловит пропущенные webhook'и, застрявших воркеров
-и «проглоченные» сбои (pr-agent вернулся штатно, но ревью на head_sha нет) —
-и дозапускает. Порты инъектируются → тестируется без GitHub/сети.
+Ловит пропущенные webhook'и, необработанные PR и застрявших воркеров — и
+дозапускает. Насколько строг критерий «есть ревью» — определяет инъектируемый
+порт `has_completed_review`; текущая go-live реализация (`sweeper_adapter`)
+проверяет DONE-строку в store, чем закрывает пропуск/застревание. Детект
+«проглоченного» сбоя (DONE в сторе, но ревью на GitHub нет) — followup: тот же
+порт, но со сверкой артефакта на GitHub (тюнится на смоуке). Порты инъектируются
+→ тестируется без GitHub/сети.
 
 За один проход:
 1) застрявшие вне терминала события (СТ-13) → свежий retry или dead-letter;
@@ -103,7 +107,8 @@ def sweep(store: StateStore, *,
                         f"({max_cycles} циклов). Требуется ручной запуск: `{cmd}`.")
                     rep.escalated.append(bkey)
                 continue
-            # reconcile-событие с force: GitHub — истина, обходим already_done.
+            # reconcile-событие с force: обходим already_done (has_completed_review
+            # уже сказал «ревью нет» — истина порта, для go-live это store).
             # id на монотонном seq — не коллизится при флапе has_completed_review.
             rec = Event(delivery_id=f"reconcile:{bkey}:{store.next_seq()}", repo=pr.repo,
                         number=pr.number, head_sha=pr.head_sha, command=cmd,

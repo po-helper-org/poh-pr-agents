@@ -79,14 +79,20 @@ cd self-hosted && python3 -m unittest discover -s reliability/tests -t . -v
 
 Логика `sweep()` реализована и покрыта тестами (СТ-13, 29..32): застрявшие вне
 терминала → свежий retry или dead-letter; открытые PR без подтверждённого ревью →
-reconcile-enqueue с `force` (доверяет GitHub-истине, а не store-статусу — этим
-закрывается «проглоченный» сбой); эскалация после `max_cycles` циклов.
+reconcile-enqueue с `force` (обходит `already_done`); эскалация после `max_cycles`
+циклов.
 
-Осталось для деплоя (интеграционные порты, как у `analyze_adapter`):
-- периодический раннер (крон/loop, интервал `sweeper.interval`);
-- порт `list_open_prs()` (GitHub API);
-- порт `has_completed_review(repo, number, head_sha, command)` — проверка наличия
-  ревью бота по head_sha (ground truth против проглоченного сбоя);
+Строгость критерия «ревью есть» задаёт инъектируемый порт `has_completed_review`.
+Go-live реализация (`sweeper_adapter.make_has_completed_review`) проверяет
+DONE-строку в store — это закрывает **пропущенные webhook'и, необработанные и
+застрявшие PR**. Детект «проглоченного» сбоя (DONE в сторе, но ревью на GitHub
+по head_sha нет) — followup: тот же порт со сверкой артефакта pr-agent на GitHub,
+тюнится на смоуке.
+
+Уже собрано для деплоя (`sweeper_adapter` + `sweeper_runner`):
+- периодический раннер (loop, интервал `RELIABILITY_SWEEP_INTERVAL`);
+- порт `list_open_prs()` через `client.list_open_pulls` (GitHub API, пагинация);
+- порт `has_completed_review(...)` через `store.already_done` (см. followup выше);
 - `enqueue(event, force=…)` → `supervisor.process(..., force=force)`.
 
 ## Дальше по фазам
