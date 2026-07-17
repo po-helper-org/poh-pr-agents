@@ -59,7 +59,9 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
     reason: Optional[str] = None
     try:
         result = run_fn(lambda: process(event, analyze, store, force=force), task_timeout)
-        if result.state == State.DONE:
+        # skipped=True — работа уже сделана/захвачена сиблингом: ack, не nack
+        # (иначе проигравший в гонке за бизнес-ключ копит attempts → ложный DLQ).
+        if result.state == State.DONE or result.skipped:
             queue.ack(lease.id, lease.token)
             metrics.incr("processed_ok")
             return "ack"

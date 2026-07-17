@@ -57,6 +57,18 @@ class GitHubAppClient:
                 return found
             page += 1
 
+    def get_pull_head_sha(self, repo: str, number: int) -> str:
+        """head SHA открытого PR по номеру — для обогащения issue_comment-событий
+        (в их payload sha нет). Пусто, если номер — issue, а не PR (404), или ошибка:
+        обогащение тогда отбросит событие, а не сохранит с пустым ключом."""
+        s, b = self._transport(
+            "GET", f"{self._api}/repos/{repo}/pulls/{number}", None, self._headers(repo))
+        if s == 404:
+            return ""  # issue, не PR — ревьюить нечего
+        if s >= 300:
+            raise RuntimeError(f"get pull {s}: {b[:200]!r}")
+        return ((json.loads(b).get("head") or {}).get("sha")) or ""
+
     def list_open_pulls(self, repo: str) -> list:
         """Открытые PR репозитория (по всем страницам) — для reconciliation sweeper."""
         out, page = [], 1
@@ -70,6 +82,25 @@ class GitHubAppClient:
             out.extend(items)
             if len(items) < 100:
                 return out
+            page += 1
+
+    def has_bot_activity(self, repo: str, number: int) -> bool:
+        """Есть ли на PR хоть один коммент от бота — опорное доказательство того,
+        что ревью опубликовано (для детекта «проглоченного» сбоя в свипере). Точную
+        эвристику артефакта донастроить на смоуке; пагинация как в _matching_comments."""
+        page = 1
+        while True:
+            s, b = self._transport(
+                "GET",
+                f"{self._api}/repos/{repo}/issues/{number}/comments?per_page=100&page={page}",
+                None, self._headers(repo))
+            if s >= 300:
+                raise RuntimeError(f"list comments {s}: {b[:200]!r}")
+            items = json.loads(b)
+            if any((c.get("user") or {}).get("type") == "Bot" for c in items):
+                return True
+            if len(items) < 100:
+                return False
             page += 1
 
     def upsert_comment(self, repo: str, number: int, marker: str, body: str) -> None:

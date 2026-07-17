@@ -1,19 +1,26 @@
 """Реальные порты reconciliation sweeper (go-live).
 
-- `has_completed_review` через state store (`already_done`) — надёжно ловит
-  пропущенные webhook'и и необработанные PR (нет DONE-строки → reconcile).
-  Детект «проглоченного» сбоя (DONE в сторе, но ревью на GitHub нет) требует
-  проверки артефакта pr-agent на самом GitHub — followup, тюнится на смоуке.
+- `has_completed_review` = «нет DONE-строки в сторе → reconcile» И (опционально)
+  подтверждение DONE-строки артефактом на самом GitHub. Без `verify` — store-only
+  (ловит пропущенные webhook'и / необработанные / застрявшие PR). С `verify` —
+  DONE в сторе перепроверяется против GitHub: если артефакта ревью нет, это
+  «проглоченный» сбой (pr-agent вернулся штатно, но ничего не опубликовал) →
+  reconcile. Сам предикат `verify` инъектируется, чтобы точную эвристику артефакта
+  (какой коммент/ревью считать доказательством) можно было донастроить на смоуке
+  без правки логики свипера.
 - `list_open_prs` — открытые PR по настроенным репозиториям (GitHub API).
 
-Парсинг и решение тестируемы; реальные HTTP-вызовы (`make_list_open_prs`) — pragma.
+Парсинг и композиция тестируемы; реальные HTTP-вызовы — pragma.
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Optional
 
 from reliability.sweeper import OpenPR, business_key
 from reliability.state import StateStore
+
+# (repo, number, head_sha, command) -> артефакт ревью присутствует на GitHub
+VerifyReview = Callable[[str, int, str, str], bool]
 
 
 def parse_open_prs(pulls_json: list, repo: str) -> list:
@@ -26,10 +33,26 @@ def parse_open_prs(pulls_json: list, repo: str) -> list:
     return out
 
 
-def make_has_completed_review(store: StateStore) -> Callable[[str, int, str, str], bool]:
+def make_has_completed_review(
+    store: StateStore, verify: Optional[VerifyReview] = None
+) -> Callable[[str, int, str, str], bool]:
     def has_completed_review(repo: str, number: int, head_sha: str, command: str) -> bool:
-        return store.already_done(business_key(repo, number, head_sha, command))
+        if not store.already_done(business_key(repo, number, head_sha, command)):
+            return False              # нет DONE-строки → точно не сделано → reconcile
+        if verify is None:
+            return True               # store-only: доверяем DONE-строке
+        # DONE в сторе есть — подтверждаем реальным артефактом (ловим проглоченный сбой)
+        return verify(repo, number, head_sha, command)
     return has_completed_review
+
+
+def make_github_review_verifier(client) -> VerifyReview:  # pragma: no cover - реальный GitHub
+    """Опорный `verify`: доказательством ревью считаем наличие активности бота на PR.
+    Точную эвристику (formal review vs. коммент, привязка к head_sha) донастроить на
+    смоуке — здесь только композиция, чтобы порт можно было заменить не трогая свипер."""
+    def verify(repo: str, number: int, head_sha: str, command: str) -> bool:
+        return client.has_bot_activity(repo, number)
+    return verify
 
 
 def make_list_open_prs(client, repos):  # pragma: no cover - реальные вызовы GitHub

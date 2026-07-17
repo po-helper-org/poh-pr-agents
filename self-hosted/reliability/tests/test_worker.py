@@ -106,6 +106,21 @@ class TestWorker(unittest.TestCase):
         self.assertEqual(self.client.calls, [])              # НЕТ ложного коммента
         self.assertEqual(metrics.get("dead_letter_total"), 0)
 
+    def test_claim_loss_acks_without_false_dead_letter(self):
+        # СТ-16: доставка, проигравшая захват бизнес-ключа (сиблинг in-flight),
+        # должна ack, а не nack — иначе копит attempts → ложный DLQ-коммент.
+        e = Event("b:/review", "o/r", 7, "abc", "/review")
+        self.store.record_received(e)
+        self.queue.enqueue(event_to_dict(e), e.repo)
+        # сиблинг того же бизнес-ключа держит захват (эмулируем in-flight)
+        self.store.try_claim(e.business_key, "a:/review")
+        spy = FakeAnalyze()
+        out = self._handle(spy, max_attempts=1)          # порог DLQ=1 — поймали бы ложный DLQ
+        self.assertEqual(out, "ack")
+        self.assertEqual(spy.calls, 0)                   # анализ не запускали
+        self.assertEqual(self.client.calls, [])          # НЕТ ложного коммента
+        self.assertEqual(metrics.get("dead_letter_total"), 0)
+
     def test_run_once_empty_returns_false(self):
         self.assertFalse(run_once(self.queue, store=self.store, client=self.client,
                                   analyze=FakeAnalyze()))

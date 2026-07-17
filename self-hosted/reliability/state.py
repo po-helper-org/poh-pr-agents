@@ -104,6 +104,11 @@ class StateStore:
                 updated_at   REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS seq (id INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE IF NOT EXISTS claims (
+                business_key TEXT PRIMARY KEY,
+                delivery_id  TEXT NOT NULL,
+                updated_at   REAL NOT NULL
+            );
             """
         )
         self._db.commit()
@@ -218,3 +223,41 @@ class StateStore:
         cur = self._db.execute("INSERT INTO seq DEFAULT VALUES")
         self._db.commit()
         return int(cur.lastrowid)
+
+    def try_claim(self, business_key: str, delivery_id: str) -> bool:
+        """СТ-16: атомарный захват бизнес-ключа под анализ.
+
+        True — ключ захвачен этим delivery_id (или уже держится им же, re-entrant);
+        False — держит другой in-flight delivery → конкурентная доставка должна
+        пропустить анализ, чтобы одна и та же работа не выполнилась дважды.
+        Захват атомарен на уровне БД (INSERT ... ON CONFLICT DO NOTHING).
+        """
+        now = self._clock()
+        inserted = self._db.execute(
+            "INSERT INTO claims(business_key,delivery_id,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(business_key) DO NOTHING",
+            (business_key, delivery_id, now),
+        ).rowcount
+        self._db.commit()
+        if inserted:
+            return True
+        row = self._db.execute(
+            "SELECT delivery_id FROM claims WHERE business_key=?", (business_key,)
+        ).fetchone()
+        return row is not None and row[0] == delivery_id
+
+    def release_claim(self, business_key: str, delivery_id: str) -> None:
+        """Освободить захват — только если держит именно этот delivery_id
+        (не срываем чужой активный захват при гонке)."""
+        self._db.execute(
+            "DELETE FROM claims WHERE business_key=? AND delivery_id=?",
+            (business_key, delivery_id),
+        )
+        self._db.commit()
+
+    def claim_holder(self, business_key: str) -> Optional[str]:
+        """delivery_id текущего держателя захвата, либо None (для диагностики/тестов)."""
+        row = self._db.execute(
+            "SELECT delivery_id FROM claims WHERE business_key=?", (business_key,)
+        ).fetchone()
+        return row[0] if row else None

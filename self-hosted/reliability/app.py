@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request, Response
 from reliability.ingress import handle_webhook
 from reliability.queue import DurableQueue
 from reliability.state import StateStore, event_to_dict
+from reliability.webhook import enrich_events
 
 WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 STORE_PATH = os.environ.get("RELIABILITY_DB", "/data/reliability.db")
@@ -21,6 +22,13 @@ QUEUE_PATH = os.environ.get("RELIABILITY_QUEUE", "/data/queue.db")
 app = FastAPI()
 _store = StateStore(STORE_PATH)
 _queue = DurableQueue(QUEUE_PATH)
+
+
+def _enrich(events):  # pragma: no cover - реальный GitHub-порт, проверяется на смоуке
+    from reliability import analyze_adapter
+    from reliability.github_client import GitHubAppClient
+    client = GitHubAppClient(token_provider=analyze_adapter.installation_token)
+    return enrich_events(events, client.get_pull_head_sha)
 
 
 @app.get("/health")
@@ -36,7 +44,8 @@ async def webhook(request: Request):
         _queue.enqueue(event_to_dict(event), event.repo)  # партиция = repo (СТ-7)
 
     status = handle_webhook(raw, dict(request.headers),
-                            secret=WEBHOOK_SECRET, store=_store, schedule=schedule)
+                            secret=WEBHOOK_SECRET, store=_store, schedule=schedule,
+                            enrich=_enrich)
     if status != 200:
         return Response(status_code=status)
     return {}  # СТ-4: быстрый 200, работа — в очереди/воркере

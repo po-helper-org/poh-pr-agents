@@ -1,7 +1,7 @@
-"""СТ-8: разбор webhook → Event."""
+"""СТ-8: разбор webhook → Event + обогащение head_sha."""
 import unittest
 
-from reliability.webhook import parse_events
+from reliability.webhook import enrich_events, parse_events
 
 
 def pr_payload(action="opened"):
@@ -42,6 +42,40 @@ class TestParseEvents(unittest.TestCase):
 
     def test_unknown_event_ignored(self):
         self.assertEqual(parse_events("push", "d", {}), [])
+
+
+class TestEnrichHeadSha(unittest.TestCase):
+    def _issue_comment_event(self):
+        p = {"action": "created", "repository": {"full_name": "o/r"},
+             "issue": {"number": 9}, "comment": {"body": "/review"}}
+        (e,) = parse_events("issue_comment", "d", p)
+        self.assertEqual(e.head_sha, "")  # в payload sha нет
+        return e
+
+    def test_fills_missing_head_sha(self):
+        e = self._issue_comment_event()
+        out = enrich_events([e], lambda repo, num: "sha9")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].head_sha, "sha9")
+        self.assertEqual(out[0].business_key, "o/r#9@sha9:/review")
+
+    def test_drops_event_when_not_a_pr(self):
+        e = self._issue_comment_event()
+        out = enrich_events([e], lambda repo, num: "")  # issue — не PR
+        self.assertEqual(out, [])  # неполный ключ хуже отсутствия события
+
+    def test_pr_event_passes_without_api_call(self):
+        (e,) = parse_events("pull_request", "d", pr_payload("opened"),
+                            pr_commands=("/review",))
+        calls = []
+
+        def fetch(repo, num):
+            calls.append((repo, num))
+            return "should-not-be-used"
+
+        out = enrich_events([e], fetch)
+        self.assertEqual(out[0].head_sha, "abc")  # исходный sha сохранён
+        self.assertEqual(calls, [])               # к API не ходили
 
 
 if __name__ == "__main__":

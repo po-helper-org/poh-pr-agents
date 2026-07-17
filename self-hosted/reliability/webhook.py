@@ -6,9 +6,36 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Callable
+
 from reliability.state import Event
 
 DEFAULT_PR_COMMANDS = ("/describe", "/review")
+
+# (repo, number) -> head_sha ("" если issue не является PR / API недоступен)
+FetchHeadSha = Callable[[str, int], str]
+
+
+def enrich_events(events: list[Event], fetch_head_sha: FetchHeadSha) -> list[Event]:
+    """Дозаполнить head_sha для событий без него (issue_comment: в payload sha нет).
+
+    Ключ идемпотентности (business_key) зависит от head_sha, поэтому обогащение
+    ОБЯЗАНО выполняться до record_received/enqueue — иначе строка сохранится с
+    пустым sha и reconcile/дедуп по push сломаются. События, для которых sha так и
+    не получен (issue — не PR, либо API молчит), отбрасываются: ревьюить нечего,
+    а неполный ключ хуже отсутствия события. PR-события уже несут sha → проходят
+    без обращения к API.
+    """
+    out: list[Event] = []
+    for e in events:
+        if e.head_sha:
+            out.append(e)
+            continue
+        sha = fetch_head_sha(e.repo, e.number)
+        if sha:
+            out.append(replace(e, head_sha=sha))
+    return out
 PR_TRIGGER_ACTIONS = frozenset({"opened", "reopened", "ready_for_review", "synchronize"})
 
 

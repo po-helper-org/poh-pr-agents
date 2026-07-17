@@ -14,9 +14,12 @@ from reliability.security import verify_signature
 from reliability.state import Event, StateStore
 from reliability.webhook import parse_events
 
+Enrich = Callable[[list], list]  # list[Event] -> list[Event]; обогащение head_sha (СТ-8)
+
 
 def handle_webhook(raw: bytes, headers: dict, *, secret: str,
-                   store: StateStore, schedule: Callable[[Event], None]) -> int:
+                   store: StateStore, schedule: Callable[[Event], None],
+                   enrich: Enrich = lambda evs: evs) -> int:
     h = {k.lower(): v for k, v in headers.items()}
     if not verify_signature(secret, raw, h.get("x-hub-signature-256")):
         return 401  # СТ-1
@@ -29,6 +32,9 @@ def handle_webhook(raw: bytes, headers: dict, *, secret: str,
     try:
         events = parse_events(h.get("x-github-event", ""),
                               h.get("x-github-delivery", ""), payload)
+        # обогащение head_sha ДО record_received: business_key зависит от sha
+        # (issue_comment приходит без sha). Дефолт — identity (PR уже несёт sha).
+        events = enrich(events)
     except (KeyError, TypeError):
         return 400  # подстраховка: parse_events и так устойчив к пропускам полей
     for event in events:

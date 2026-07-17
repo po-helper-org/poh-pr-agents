@@ -67,6 +67,27 @@ class TestStateStore(unittest.TestCase):
         self.store.transition("d1", State.QUEUED)  # СТ-28
         self.assertEqual(self.store.state_of("d1"), State.QUEUED)
 
+    # СТ-16: атомарный захват бизнес-ключа
+    def test_try_claim_first_wins_second_loses(self):
+        bk = "o/r#7@abc:/review"
+        self.assertTrue(self.store.try_claim(bk, "a"))    # первый захватил
+        self.assertFalse(self.store.try_claim(bk, "b"))   # второй — чужой держит
+        self.assertEqual(self.store.claim_holder(bk), "a")
+
+    def test_try_claim_is_reentrant_for_same_holder(self):
+        bk = "o/r#7@abc:/review"
+        self.assertTrue(self.store.try_claim(bk, "a"))
+        self.assertTrue(self.store.try_claim(bk, "a"))    # тот же держатель — ок
+
+    def test_release_claim_only_by_holder(self):
+        bk = "o/r#7@abc:/review"
+        self.store.try_claim(bk, "a")
+        self.store.release_claim(bk, "b")                 # чужой не срывает захват
+        self.assertEqual(self.store.claim_holder(bk), "a")
+        self.store.release_claim(bk, "a")                 # держатель освобождает
+        self.assertIsNone(self.store.claim_holder(bk))
+        self.assertTrue(self.store.try_claim(bk, "b"))    # теперь можно пере-захватить
+
     # СТ-12
     def test_increment_attempt(self):
         self.store.record_received(make_event())

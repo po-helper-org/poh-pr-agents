@@ -16,7 +16,11 @@ def main():  # pragma: no cover - deploy entrypoint
     from reliability.queue import DurableQueue
     from reliability.state import StateStore, event_to_dict
     from reliability.sweeper import sweep
-    from reliability.sweeper_adapter import make_has_completed_review, make_list_open_prs
+    from reliability.sweeper_adapter import (
+        make_github_review_verifier,
+        make_has_completed_review,
+        make_list_open_prs,
+    )
 
     store = StateStore(os.environ.get("RELIABILITY_DB", "/data/reliability.db"))
     queue = DurableQueue(os.environ.get("RELIABILITY_QUEUE", "/data/queue.db"))
@@ -31,7 +35,11 @@ def main():  # pragma: no cover - deploy entrypoint
     def enqueue(event, *, force=False):
         queue.enqueue(event_to_dict(event), event.repo)  # force выводится воркером из event_type
 
-    has_completed_review = make_has_completed_review(store)
+    # store-only по умолчанию; RELIABILITY_VERIFY_GITHUB=1 включает детект
+    # проглоченного сбоя (сверка артефакта на GitHub) — эвристика тюнится на смоуке.
+    verify = (make_github_review_verifier(client)
+              if os.environ.get("RELIABILITY_VERIFY_GITHUB") == "1" else None)
+    has_completed_review = make_has_completed_review(store, verify=verify)
     list_open_prs = make_list_open_prs(client, repos)
 
     while True:

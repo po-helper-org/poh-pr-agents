@@ -48,13 +48,26 @@ def process(event: Event, analyze: Analyze, store: StateStore, *, force: bool = 
         row = store.get(event.delivery_id)
         return Result(State.DONE, int(row["attempts"]) if row else 0, skipped=True)
 
+    # СТ-16: атомарный захват бизнес-ключа. Две конкурентные доставки одного
+    # ключа (напр. повторная доставка webhook с новым delivery_id) не должны
+    # запустить анализ дважды — comment-дубль закрыт upsert (СТ-25), но сам
+    # анализ повторялся. Проигравший — skip; его строка останется вне терминала
+    # и будет добита already_done/свипером после победителя (без тихой потери).
+    # force (reconcile) тоже уважает захват: свежий in-flight важнее reconcile.
+    if not store.try_claim(event.business_key, event.delivery_id):
+        row = store.get(event.delivery_id)
+        cur = store.state_of(event.delivery_id) or State.RECEIVED
+        return Result(cur, int(row["attempts"]) if row else 0, skipped=True)
+
     _ensure_processing(store, event.delivery_id)
     attempts = store.increment_attempt(event.delivery_id)
     try:
         analyze(event)
     except Exception:  # доменный сбой одной попытки; BaseException (отмена) — наверх
         store.transition(event.delivery_id, State.FAILED)
+        store.release_claim(event.business_key, event.delivery_id)  # дать ретраю пере-захват
         return Result(State.FAILED, attempts)
 
     store.transition(event.delivery_id, State.DONE)
+    store.release_claim(event.business_key, event.delivery_id)
     return Result(State.DONE, attempts)

@@ -90,5 +90,50 @@ class TestUpsertComment(unittest.TestCase):
             client_with(BadGet()).upsert_comment("o/r", 7, MARKER, "x")
 
 
+class TestGetPullHeadSha(unittest.TestCase):
+    def _client(self, status, body):
+        def transport(method, url, data, headers):
+            self.assertEqual(method, "GET")
+            self.assertIn("/pulls/9", url)
+            return status, body
+        return GitHubAppClient(token_provider=lambda repo: "tok", transport=transport)
+
+    def test_returns_head_sha(self):
+        c = self._client(200, json.dumps({"head": {"sha": "s9"}}).encode())
+        self.assertEqual(c.get_pull_head_sha("o/r", 9), "s9")
+
+    def test_404_is_empty_not_error(self):
+        # номер оказался issue, а не PR → пусто (обогащение отбросит событие)
+        c = self._client(404, b'{"message":"Not Found"}')
+        self.assertEqual(c.get_pull_head_sha("o/r", 9), "")
+
+    def test_other_error_raises(self):
+        c = self._client(500, b"boom")
+        with self.assertRaises(RuntimeError):
+            c.get_pull_head_sha("o/r", 9)
+
+
+class TestHasBotActivity(unittest.TestCase):
+    def test_true_when_bot_comment_present(self):
+        t = PagingTransport([[bot_comment(5)]])
+        self.assertTrue(client_with(t).has_bot_activity("o/r", 7))
+
+    def test_false_when_only_human_comments(self):
+        human = {"id": 1, "body": "hi", "user": {"type": "User"}}
+        t = PagingTransport([[human]])
+        self.assertFalse(client_with(t).has_bot_activity("o/r", 7))
+
+    def test_false_when_no_comments(self):
+        t = PagingTransport([[]])
+        self.assertFalse(client_with(t).has_bot_activity("o/r", 7))
+
+    def test_finds_bot_on_second_page(self):
+        page1 = [{"id": i, "body": "x", "user": {"type": "User"}} for i in range(100)]
+        page2 = [bot_comment(777)]
+        t = PagingTransport([page1, page2])
+        self.assertTrue(client_with(t).has_bot_activity("o/r", 7))
+        self.assertEqual(t.methods(), ["GET", "GET"])
+
+
 if __name__ == "__main__":
     unittest.main()

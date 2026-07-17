@@ -68,6 +68,7 @@ services:
       RELIABILITY_COMMANDS: "${RELIABILITY_COMMANDS:-/describe,/review}"
       RELIABILITY_SWEEP_INTERVAL: "${RELIABILITY_SWEEP_INTERVAL:-300}"
       RELIABILITY_STALE_DEADLINE: "${RELIABILITY_STALE_DEADLINE:-1800}"
+      RELIABILITY_VERIFY_GITHUB: "${RELIABILITY_VERIFY_GITHUB:-}"   # "1" — детект проглоченного сбоя (тюнится на смоуке)
     command: ["python", "-m", "reliability.sweeper_runner"]
     volumes:
       - reliability-data:/data
