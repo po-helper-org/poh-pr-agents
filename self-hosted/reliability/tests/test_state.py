@@ -88,6 +88,30 @@ class TestStateStore(unittest.TestCase):
         self.assertIsNone(self.store.claim_holder(bk))
         self.assertTrue(self.store.try_claim(bk, "b"))    # теперь можно пере-захватить
 
+    # СТ-16: захват самозалечивается, если держатель уже терминален (утечка при
+    # брошенном по таймауту process → dead-letter без release_claim). Иначе К-1:
+    # reconcile-бэкстоп навсегда заблокирован.
+    def test_try_claim_steals_stale_terminal_holder(self):
+        holder = make_event(delivery_id="e1")            # bk = o/r#7@abc:/review
+        bk = holder.business_key
+        self.store.record_received(holder)
+        self.store.try_claim(bk, "e1")                    # захват как во время анализа
+        for s in (State.QUEUED, State.PROCESSING, State.FAILED, State.DEAD_LETTER):
+            self.store.transition("e1", s)                # держатель dead-letter, release не звался
+        self.assertEqual(self.store.claim_holder(bk), "e1")   # захват «протух»
+        self.assertTrue(self.store.try_claim(bk, "e2"))       # сиблинг перехватывает
+        self.assertEqual(self.store.claim_holder(bk), "e2")
+
+    def test_try_claim_does_not_steal_inflight_holder(self):
+        holder = make_event(delivery_id="e1")
+        bk = holder.business_key
+        self.store.record_received(holder)
+        self.store.try_claim(bk, "e1")
+        self.store.transition("e1", State.QUEUED)
+        self.store.transition("e1", State.PROCESSING)    # держатель жив (in-flight)
+        self.assertFalse(self.store.try_claim(bk, "e2"))  # НЕ перехватываем активного
+        self.assertEqual(self.store.claim_holder(bk), "e1")
+
     # СТ-12
     def test_increment_attempt(self):
         self.store.record_received(make_event())

@@ -64,6 +64,15 @@ class TestEnrichHeadSha(unittest.TestCase):
         out = enrich_events([e], lambda repo, num: "")  # issue — не PR
         self.assertEqual(out, [])  # неполный ключ хуже отсутствия события
 
+    def test_fetch_error_drops_event_not_raises(self):
+        # транзиентная 5xx при обогащении не должна ронять батч в 500 (риск К-1)
+        e = self._issue_comment_event()
+
+        def boom(repo, num):
+            raise RuntimeError("github 503")
+
+        self.assertEqual(enrich_events([e], boom), [])   # отброшено, не исключение
+
     def test_pr_event_passes_without_api_call(self):
         (e,) = parse_events("pull_request", "d", pr_payload("opened"),
                             pr_commands=("/review",))

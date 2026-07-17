@@ -73,6 +73,11 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
                          backoff=backoff, reason=reason)
     if outcome == "dead_letter":  # исчерпаны выдачи → эскалация (СТ-27)
         _drive_to_dead_letter(store, event.delivery_id)
+        # Освобождаем захват бизнес-ключа: process() мог быть брошен по таймауту и
+        # не вызвать release_claim → иначе захват утёк бы навсегда и заблокировал
+        # reconcile-восстановление (К-1). try_claim самозалечивается и без этого,
+        # но снимаем сразу, не заставляя сиблинга ждать своей следующей попытки.
+        store.release_claim(event.business_key, event.delivery_id)
         metrics.incr("dead_letter_total")
         notify_failure(client, event, RuntimeError(reason), lease.attempts, escalated=True)
     return outcome
@@ -81,7 +86,14 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
 def run_once(queue: DurableQueue, *, store: StateStore, client: GitHubClient, analyze,
              visibility_timeout: float = 120, task_timeout: float = 90,
              max_attempts: int = 5, backoff: float = 0) -> bool:
-    """Обработать одно сообщение; False если очередь пуста."""
+    """Обработать одно сообщение; False если очередь пуста.
+
+    Инвариант: visibility_timeout > task_timeout. Воркер бросает задачу по
+    task_timeout (90с) раньше, чем очередь передоставит по visibility_timeout
+    (120с) — иначе одно и то же сообщение могло бы обрабатываться дважды
+    конкурентно (re-entrant-захват их пропустил бы). Дубль всё равно
+    идемпотентен через upsert (СТ-25), но инвариант исключает саму гонку.
+    """
     lease = queue.lease(visibility_timeout=visibility_timeout, max_attempts=max_attempts)
     if lease is None:
         return False

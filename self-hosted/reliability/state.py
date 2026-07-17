@@ -244,7 +244,31 @@ class StateStore:
         row = self._db.execute(
             "SELECT delivery_id FROM claims WHERE business_key=?", (business_key,)
         ).fetchone()
-        return row is not None and row[0] == delivery_id
+        if row is None:
+            return self.try_claim(business_key, delivery_id)  # захват сняли между INSERT и SELECT
+        holder = row[0]
+        if holder == delivery_id:
+            return True  # re-entrant: держим его же
+        # Чужой держатель. Если его событие уже терминально (напр. dead-letter из-за
+        # зависшего анализа — release_claim не успел вызваться в бро­шенном потоке),
+        # захват «протух» → атомарно перехватываем (CAS по прежнему держателю). Так
+        # утечка захвата самозалечивается, даже если release_claim где-то не вызвался,
+        # и reconcile-бэкстоп не остаётся навсегда заблокированным (К-1).
+        # state_of(holder) is None (строки нет) в реальном потоке не возникает —
+        # захват ставится только после record_received, строки не удаляются; такой
+        # захват считаем ещё живым (не перехватываем), не выдумывая терминал.
+        holder_state = self.state_of(holder)
+        if holder_state is not None and holder_state in TERMINAL:
+            stolen = self._db.execute(
+                "UPDATE claims SET delivery_id=?, updated_at=? "
+                "WHERE business_key=? AND delivery_id=?",
+                (delivery_id, now, business_key, holder),
+            ).rowcount
+            self._db.commit()
+            if stolen:
+                return True
+            return self.try_claim(business_key, delivery_id)  # перехватил кто-то раньше нас
+        return False  # держатель реально in-flight — ждём его
 
     def release_claim(self, business_key: str, delivery_id: str) -> None:
         """Освободить захват — только если держит именно этот delivery_id

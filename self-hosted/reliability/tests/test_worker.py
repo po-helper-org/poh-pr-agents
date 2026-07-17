@@ -121,6 +121,31 @@ class TestWorker(unittest.TestCase):
         self.assertEqual(self.client.calls, [])          # НЕТ ложного коммента
         self.assertEqual(metrics.get("dead_letter_total"), 0)
 
+    def test_leaked_claim_after_dead_letter_does_not_block_recovery(self):
+        # К-1: анализ завис → таймаут → process брошен, захват держится → e1
+        # dead-letter. Захват НЕ должен навсегда блокировать reconcile того же
+        # бизнес-ключа. Эмулируем утечку: e1 держит захват и доведён до DEAD_LETTER.
+        e1 = Event("e1", "o/r", 7, "abc", "/review")
+        self.store.record_received(e1)
+        self.store.try_claim(e1.business_key, "e1")       # захват как во время анализа
+        for s in (State.QUEUED, State.PROCESSING, State.FAILED, State.DEAD_LETTER):
+            self.store.transition("e1", s)
+        self.assertEqual(self.store.claim_holder(e1.business_key), "e1")  # утечка
+        # reconcile того же бизнес-ключа приходит воркеру — должен восстановить
+        self._enqueue(did="reconcile:x", etype="reconcile")
+        spy = FakeAnalyze()
+        out = self._handle(spy)
+        self.assertEqual(out, "ack")
+        self.assertEqual(spy.calls, 1)                    # анализ пошёл — К-1 восстановлен
+
+    def test_dead_letter_releases_claim(self):
+        # Прямой путь (не таймаут): после dead-letter захват снят сразу.
+        self._enqueue()
+        e = Event("d1", "o/r", 7, "abc", "/review")
+        self._handle(FakeAnalyze(exc=RuntimeError("boom")), max_attempts=1)  # dead_letter
+        self.assertEqual(self.store.state_of("d1"), State.DEAD_LETTER)
+        self.assertIsNone(self.store.claim_holder(e.business_key))
+
     def test_run_once_empty_returns_false(self):
         self.assertFalse(run_once(self.queue, store=self.store, client=self.client,
                                   analyze=FakeAnalyze()))

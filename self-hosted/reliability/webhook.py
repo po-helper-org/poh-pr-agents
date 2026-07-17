@@ -32,7 +32,14 @@ def enrich_events(events: list[Event], fetch_head_sha: FetchHeadSha) -> list[Eve
         if e.head_sha:
             out.append(e)
             continue
-        sha = fetch_head_sha(e.repo, e.number)
+        try:
+            sha = fetch_head_sha(e.repo, e.number)
+        except Exception:
+            # транзиентная ошибка GitHub-API трактуется как 404 (см. модульный
+            # docstring ingress: 500 + бесконечные ретраи доставки — риск против
+            # К-1). Событие отбрасываем; свипер добэкстопит настроенные команды на
+            # открытых PR. Один сбойный fetch не рушит весь батч.
+            sha = ""
         if sha:
             out.append(replace(e, head_sha=sha))
     return out
