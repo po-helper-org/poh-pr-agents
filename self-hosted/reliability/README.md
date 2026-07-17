@@ -22,8 +22,11 @@
 | `sweeper.py` | СТ-13, 29..32 | **reconciliation**: застрявшие→retry/dead-letter, PR без ревью→reconcile, эскалация |
 | `queue.py` | СТ-6..9 | **durable queue**: at-least-once, visibility-timeout redelivery, DLQ, фенсинг, честность по партициям |
 | `worker.py` | СТ-14..18 | **worker loop**: lease→process(per-task таймаут)→ack/nack; при DLQ — коммент в PR (СТ-27) |
-| `sweeper_adapter.py` | — | реальные порты свипера: `list_open_prs`, `has_completed_review` (через store) |
+| `sweeper_adapter.py` | — | реальные порты свипера: `list_open_prs`, `has_completed_review` (store + опц. GitHub-verify) |
 | `sweeper_runner.py` | — | периодический раннер свипера (deploy entrypoint) |
+| `gateway.py` | СТ-19..24 | **LLM Gateway**: circuit breaker + token-bucket rate limit + failover по пулу + таймаут попытки (аутейдж Z.AI → быстрый видимый отказ, не тишина) |
+| `autoscale.py` | СТ-18 | политика числа воркеров по глубине/возрасту очереди (исполняет оркестратор) |
+| `metrics.py` | СТ-27б,33..35 | счётчики + `render_prometheus` → `/metrics` (наблюдаемость К-5) |
 
 ## Запуск тестов
 
@@ -116,9 +119,17 @@ reconcile-enqueue с `force` (обходит `already_done`); эскалация
   проверять на стейджинг-смоуке, чем менять вслепую.
 - Наблюдаемость poison-guard: DLQ на `lease` (повторные краши без nack) сейчас
   эскалируется только через sweeper (окно ~stale_deadline); дать метрику/коммент в моменте.
-- СТ-18 автоскейл воркеров по глубине/возрасту очереди — Фаза 4 (сейчас только `queue.depth()`).
-- Ретеншн `queue.partition_service` (растёт по числу репозиториев — очистка/prune на масштабе).
-- LLM Gateway (СТ-19..24), полная observability/алерты (СТ-33..35) — Фазы 3–4.
+- **Блок C (Фазы 4–5) — логика готова ✅:**
+  - LLM Gateway (СТ-19..24, `gateway.py`): circuit breaker + rate limit + failover +
+    таймаут; вкручен в `worker.main` (один провайдер Z.AI, seam под добавление ключей).
+  - Observability (СТ-33..35): `/metrics` (Prometheus) отдаёт счётчики + `queue_depth`/
+    `dead_letters`. Алерт-роутинг (healthchecks.io) — отдельный issue (уже отложен).
+  - Автоскейл (СТ-18, `autoscale.py`): политика `desired_workers`; ИСПОЛНЕНИЕ —
+    оркестратор (compose scale / k8s HPA), опрашивает `/metrics` и применяет число.
+- **Осталось (deploy-shaped / B4):**
+  - Ретеншн `queue.partition_service` (растёт по числу репозиториев — prune на масштабе).
+  - Консолидация sweeper-stale ↔ queue-redelivery (B4) — тюнить на смоуке.
+  - Потолок GitHub API rate-limit: ETag-кэш, шардирование App (`SCALE-PLAN.md §3`).
 
 > Note: SQLite-очередь durable в пределах одного узла Dokploy. Несколько узлов
 > одновременно — заменить реализацию на Redis/RabbitMQ за тем же интерфейсом

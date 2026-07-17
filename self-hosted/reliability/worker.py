@@ -112,12 +112,30 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
     import os
 
     from reliability import analyze_adapter
+    from reliability.gateway import CircuitBreaker, Gateway, Provider, TokenBucket
     from reliability.github_client import GitHubAppClient
 
     store = StateStore(os.environ.get("RELIABILITY_DB", "/data/reliability.db"))
     queue = DurableQueue(os.environ.get("RELIABILITY_QUEUE", "/data/queue.db"))
     client = GitHubAppClient(token_provider=analyze_adapter.installation_token)
-    run_forever(queue, store=store, client=client, analyze=analyze_adapter.run,
+
+    # LLM Gateway: один провайдер Z.AI (через pr-agent). Circuit breaker гасит
+    # штормовые ретраи при аутейдже Z.AI (быстрый видимый отказ, не тишина, К-1),
+    # rate limit держит поток под лимитом. Добавить ключ/провайдера — расширить
+    # список Provider(...). Таймаут попытки < worker task_timeout, чтобы сбой
+    # засчитался цепи внутри gateway, а не съелся внешним таймаутом.
+    rate = float(os.environ.get("RELIABILITY_LLM_RPS", "3"))
+    burst = float(os.environ.get("RELIABILITY_LLM_BURST", "6"))
+    gateway = Gateway(
+        [Provider("zai", analyze_adapter.run,
+                  breaker=CircuitBreaker(
+                      failure_threshold=int(os.environ.get("RELIABILITY_CB_THRESHOLD", "5")),
+                      reset_timeout=float(os.environ.get("RELIABILITY_CB_RESET", "30"))))],
+        limiter=TokenBucket(rate=rate, capacity=burst),
+        attempt_timeout=float(os.environ.get("RELIABILITY_ATTEMPT_TIMEOUT", "75")))
+
+    run_forever(queue, store=store, client=client, analyze=gateway.run,
+                task_timeout=float(os.environ.get("RELIABILITY_TASK_TIMEOUT", "90")),
                 max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")))
 
 

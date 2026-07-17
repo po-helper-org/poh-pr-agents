@@ -10,6 +10,7 @@ import os
 
 from fastapi import FastAPI, Request, Response
 
+from reliability import metrics
 from reliability.ingress import handle_webhook
 from reliability.queue import DurableQueue
 from reliability.state import StateStore, event_to_dict
@@ -34,6 +35,14 @@ def _enrich(events):  # pragma: no cover - реальный GitHub-порт, п�
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+def metrics_endpoint():  # pragma: no cover - тонкая обвязка над render_prometheus
+    # gauge'и снимаем в момент запроса; глубина очереди и размер DLQ — сигнал К-5
+    # (растёт DLQ → есть непрокрученные провалы) и вход для автоскейла (СТ-18).
+    gauges = {"queue_depth": _queue.depth(), "dead_letters": len(_queue.dead_letters())}
+    return Response(content=metrics.render_prometheus(gauges), media_type="text/plain")
 
 
 @app.post("/webhook")

@@ -52,7 +52,15 @@ services:
     restart: unless-stopped
     depends_on:
       - ingress            # чтобы образ собрался сервисом ingress
-    environment: *reliability-env
+    environment:
+      <<: *reliability-env
+      # LLM Gateway (СТ-19..24): rate limit + circuit breaker вокруг Z.AI
+      RELIABILITY_LLM_RPS: "${RELIABILITY_LLM_RPS:-3}"                 # запросов/сек к LLM
+      RELIABILITY_LLM_BURST: "${RELIABILITY_LLM_BURST:-6}"            # ёмкость всплеска
+      RELIABILITY_CB_THRESHOLD: "${RELIABILITY_CB_THRESHOLD:-5}"      # сбоев подряд → размыкание
+      RELIABILITY_CB_RESET: "${RELIABILITY_CB_RESET:-30}"            # сек до пробного вызова
+      RELIABILITY_ATTEMPT_TIMEOUT: "${RELIABILITY_ATTEMPT_TIMEOUT:-75}"  # < task_timeout
+      RELIABILITY_TASK_TIMEOUT: "${RELIABILITY_TASK_TIMEOUT:-90}"
     command: ["python", "-m", "reliability.worker"]
     volumes:
       - reliability-data:/data
