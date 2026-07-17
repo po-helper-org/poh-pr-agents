@@ -15,15 +15,19 @@
 | Режим | Когда | Гайд |
 |-------|-------|------|
 | **A. GitHub Actions** | Actions доступны (публичный репо или есть минуты). Проще всего. | [Быстрый старт](#быстрый-старт-3-шага) ниже |
-| **B. Self-hosted (Dokploy)** | Actions **недоступны**: аккаунт залочен по биллингу (`account is locked due to a billing issue`), кончились минуты, запрет политикой. Свой сервер, webhook GitHub App — мимо Actions. | [`self-hosted/SETUP.md`](self-hosted/SETUP.md) |
+| **B. Self-hosted (Dokploy)** | Actions **недоступны**: аккаунт залочен по биллингу (`account is locked due to a billing issue`), кончились минуты, запрет политикой. Свой сервер, webhook GitHub App — мимо Actions. | [`self-hosted/DEPLOY.md`](self-hosted/DEPLOY.md) |
 
-> Режим B — то же ревью, но как **webhook-приложение** на вашей инфре: авто-ревью на открытие PR + диалог командами (`/ask`, `/review`, …), one-shot по [runbook'у](self-hosted/SETUP.md) со всеми подводными камнями. Важно: self-hosted **runner Actions биллинг-лок НЕ обходит** — только webhook App.
+> Режим B — то же ревью как **отказоустойчивое webhook-приложение** на вашей инфре
+> (не молчит при сбоях: любой провал → видимый коммент в PR). Сквозная инструкция от
+> нуля до работы под нагрузкой — [`self-hosted/DEPLOY.md`](self-hosted/DEPLOY.md);
+> как устроено и как чинить — [`self-hosted/ARCHITECTURE.md`](self-hosted/ARCHITECTURE.md).
+> Важно: self-hosted **runner Actions биллинг-лок НЕ обходит** — только webhook App.
 
 ---
 
 ## Быстрый старт (3 шага)
 
-> Это режим **A** (GitHub Actions). Для self-hosted → [`self-hosted/SETUP.md`](self-hosted/SETUP.md).
+> Это режим **A** (GitHub Actions). Для self-hosted → [`self-hosted/DEPLOY.md`](self-hosted/DEPLOY.md).
 
 ### 1. Положите конфиг в репозиторий
 

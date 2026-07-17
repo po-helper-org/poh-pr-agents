@@ -1,5 +1,10 @@
 # Self-hosted PR-Agent (GLM-5) as a GitHub App — Dokploy runbook
 
+> 👉 **Новичку — начни с [`DEPLOY.md`](DEPLOY.md)**: сквозная инструкция от нуля до
+> работы под нагрузкой (создание App, секреты, Dokploy Compose, проверка, масштаб).
+> Этот файл — справочник подводных камней (traefik, env, PEM, регион), на который
+> `DEPLOY.md` ссылается.
+
 Runs [PR-Agent](https://github.com/qodo-ai/pr-agent) as a **webhook GitHub App**
 on your own box, with **GLM-5 via Z.AI**. Use this instead of the GitHub Actions
 workflow when Actions can't run — e.g. the account is **billing-locked**
