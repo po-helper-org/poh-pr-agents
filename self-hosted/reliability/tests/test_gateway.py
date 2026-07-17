@@ -11,7 +11,7 @@ from reliability.gateway import (
     RateLimited,
     TokenBucket,
 )
-from reliability.state import Event
+from reliability.state import Backpressure, Event
 
 
 class _Clock:
@@ -181,6 +181,11 @@ class TestGateway(unittest.TestCase):
     def test_requires_at_least_one_provider(self):
         with self.assertRaises(ValueError):
             Gateway([], run_fn=passthrough)
+
+    def test_rate_limited_is_backpressure(self):
+        # воркер ловит базовый Backpressure, не завися от gateway → откладывает,
+        # а не метит как сбой (иначе троттлинг = ложный DLQ)
+        self.assertTrue(issubclass(RateLimited, Backpressure))
 
 
 if __name__ == "__main__":

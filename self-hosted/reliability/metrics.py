@@ -6,6 +6,7 @@ gateway_*, глубина очереди видны снаружи, «тихих
 """
 from __future__ import annotations
 
+import re
 import threading
 from typing import Optional
 
@@ -13,6 +14,14 @@ _counters: dict[str, int] = {}
 _lock = threading.Lock()
 
 _PREFIX = "reliability_"
+_INVALID = re.compile(r"[^a-zA-Z0-9_]")
+
+
+def _safe(name: str) -> str:
+    """Санитизация имени метрики: только [a-zA-Z0-9_] (иначе пробел/перевод строки
+    в имени сломал бы формат экспозиции). Сейчас имена — внутренние литералы, но
+    защищаемся на случай, если имя когда-то придёт из данных события/репо."""
+    return _INVALID.sub("_", name)
 
 
 def render_prometheus(gauges: Optional[dict] = None) -> str:
@@ -21,11 +30,11 @@ def render_prometheus(gauges: Optional[dict] = None) -> str:
     сопровождается `# TYPE`. Значения — целые/числа, метки не используются (плоско)."""
     lines: list[str] = []
     for name, value in sorted(snapshot().items()):
-        metric = f"{_PREFIX}{name}"
+        metric = f"{_PREFIX}{_safe(name)}"
         lines.append(f"# TYPE {metric} counter")
         lines.append(f"{metric} {value}")
     for name, value in sorted((gauges or {}).items()):
-        metric = f"{_PREFIX}{name}"
+        metric = f"{_PREFIX}{_safe(name)}"
         lines.append(f"# TYPE {metric} gauge")
         lines.append(f"{metric} {value}")
     return "\n".join(lines) + "\n"

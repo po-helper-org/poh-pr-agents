@@ -1,7 +1,7 @@
 """СТ-14..16: обработка одного события (одна попытка, без ретрая/эскалации)."""
 import unittest
 
-from reliability.state import Event, State, StateStore
+from reliability.state import Backpressure, Event, State, StateStore
 from reliability.supervisor import process
 
 
@@ -37,6 +37,16 @@ class TestProcess(unittest.TestCase):
         a = FakeAnalyze(exc=TimeoutError("stall"))
         r = process(e, a, self.store)
         self.assertEqual(r.state, State.FAILED)  # эскалация — на воркере, не здесь
+        self.assertEqual(r.error, "TimeoutError")  # точный класс — в DLQ-коммент (К-5)
+
+    def test_backpressure_reraised_not_marked_failed(self):
+        # rate limit — не сбой: process пробрасывает наверх, НЕ метит FAILED
+        e = ev()
+        self.store.record_received(e)
+        a = FakeAnalyze(exc=Backpressure("rate limited"))
+        with self.assertRaises(Backpressure):
+            process(e, a, self.store)
+        self.assertNotEqual(self.store.state_of(e.delivery_id), State.FAILED)
 
     def test_base_exception_propagates(self):
         e = ev()

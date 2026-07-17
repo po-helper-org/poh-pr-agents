@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from reliability.state import Event, State, StateStore
+from reliability.state import Backpressure, Event, State, StateStore
 
 Analyze = Callable[[Event], None]  # запускает анализ pr-agent; бросает при ошибке
 
@@ -19,6 +19,7 @@ class Result:
     state: State
     attempts: int
     skipped: bool = False
+    error: "str | None" = None  # класс исключения при FAILED — для точного reason в DLQ-комменте
 
 
 def _drive_to_done(store: StateStore, delivery_id: str) -> None:
@@ -63,10 +64,15 @@ def process(event: Event, analyze: Analyze, store: StateStore, *, force: bool = 
     attempts = store.increment_attempt(event.delivery_id)
     try:
         analyze(event)
-    except Exception:  # доменный сбой одной попытки; BaseException (отмена) — наверх
+    except Backpressure:
+        # НЕ сбой: локальный rate limit. Не метим FAILED, не публикуем провал —
+        # отдаём наверх, воркер отложит без счёта к DLQ. Захват держим (re-entrant
+        # при передоставке того же delivery_id).
+        raise
+    except Exception as exc:  # доменный сбой одной попытки; BaseException (отмена) — наверх
         store.transition(event.delivery_id, State.FAILED)
         store.release_claim(event.business_key, event.delivery_id)  # дать ретраю пере-захват
-        return Result(State.FAILED, attempts)
+        return Result(State.FAILED, attempts, error=type(exc).__name__)
 
     store.transition(event.delivery_id, State.DONE)
     store.release_claim(event.business_key, event.delivery_id)

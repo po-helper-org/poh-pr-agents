@@ -39,6 +39,13 @@ class IllegalTransition(Exception):
     """Попытка перехода вне разрешённого графа (СТ-10)."""
 
 
+class Backpressure(Exception):
+    """Сигнал «повторить позже», НЕ сбой: локальный rate limit и т.п. Воркер
+    откладывает сообщение с задержкой, не засчитывая выдачу к порогу DLQ и не
+    публикуя коммент о провале. Живёт в state (нейтральный слой), чтобы supervisor/
+    worker ловили базовый тип, не завися от gateway."""
+
+
 @dataclass(frozen=True)
 class Event:
     delivery_id: str          # X-GitHub-Delivery — ключ идемпотентности (СТ-2)

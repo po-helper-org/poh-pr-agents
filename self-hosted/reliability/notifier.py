@@ -27,12 +27,15 @@ def build_failure_comment(command: str, error_class: str, attempts: int, escalat
     return f"{head}\n\n{detail}\n\n{tail}"
 
 
-def notify_failure(client: GitHubClient, event, error: BaseException, attempts: int, escalated: bool) -> str:
+def notify_failure(client: GitHubClient, event, error, attempts: int, escalated: bool) -> str:
     """Идемпотентно публикует комментарий о провале (СТ-25 upsert) и возвращает тело.
 
     Один коммент на (PR, команда): ретраи/reconcile правят его, а не плодят дубли.
+    `error` — исключение ИЛИ строка-класс причины (воркер отдаёт точный класс сбоя,
+    напр. GatewayUnavailable vs Z.AI-ошибка, чтобы коммент/метрика не врали, К-5).
     """
-    body = build_failure_comment(event.command, type(error).__name__, attempts, escalated)
+    error_class = error if isinstance(error, str) else type(error).__name__
+    body = build_failure_comment(event.command, error_class, attempts, escalated)
     marker = f"<!-- reliability:failure:{event.command} -->"
     client.upsert_comment(event.repo, event.number, marker, body)
     return body

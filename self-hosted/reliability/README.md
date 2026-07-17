@@ -122,6 +122,12 @@ reconcile-enqueue с `force` (обходит `already_done`); эскалация
 - **Блок C (Фазы 4–5) — логика готова ✅:**
   - LLM Gateway (СТ-19..24, `gateway.py`): circuit breaker + rate limit + failover +
     таймаут; вкручен в `worker.main` (один провайдер Z.AI, seam под добавление ключей).
+    rate limit **процессный** → при N воркерах суммарный RPS ≈ N×rate: задавать
+    `RELIABILITY_LLM_RPS ≈ (лимит Z.AI)/(макс. реплик)` или вынести лимитер в Redis.
+    Rate-limit = backpressure (`state.Backpressure`): воркер откладывает событие
+    (`queue.defer`, `RELIABILITY_BACKPRESSURE_DELAY`) БЕЗ счёта к DLQ и без ложного
+    коммента; реальные сбои ретраятся с `RELIABILITY_BACKOFF`×attempts. Класс сбоя
+    (GatewayUnavailable / Z.AI-ошибка / таймаут) доходит до DLQ-коммента и метрики.
   - Observability (СТ-33..35): `/metrics` (Prometheus) отдаёт счётчики + `queue_depth`/
     `dead_letters`. Алерт-роутинг (healthchecks.io) — отдельный issue (уже отложен).
   - Автоскейл (СТ-18, `autoscale.py`): политика `desired_workers`; ИСПОЛНЕНИЕ —

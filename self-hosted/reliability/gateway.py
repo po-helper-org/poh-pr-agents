@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from reliability import metrics
-from reliability.state import Event
+from reliability.state import Backpressure, Event
 
 Invoke = Callable[[Event], None]  # реальный вызов провайдера; бросает при сбое
 
@@ -38,8 +38,9 @@ class GatewayUnavailable(Exception):
     """Все провайдеры пула недоступны (цепи разомкнуты или все попытки сбойны)."""
 
 
-class RateLimited(Exception):
-    """Превышен локальный лимит запросов — backpressure (очередь повторит)."""
+class RateLimited(Backpressure):
+    """Превышен локальный лимит запросов — backpressure: воркер отложит без счёта
+    к DLQ и без ложного коммента о провале (не сбой, а сдерживание потока)."""
 
 
 class Circuit(str, enum.Enum):

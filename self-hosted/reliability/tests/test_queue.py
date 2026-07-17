@@ -35,6 +35,23 @@ class TestDurableQueue(unittest.TestCase):
         self.assertEqual(self.q.depth(), 0)
         self.assertIsNone(self.q.lease(visibility_timeout=30))
 
+    def test_defer_delays_and_does_not_count_toward_dlq(self):
+        # backpressure: defer возвращает сообщение с задержкой и ОТКАТЫВАЕТ attempts++
+        self.q.enqueue({"x": 1}, "o/r")
+        lease = self.q.lease(visibility_timeout=30)       # attempts -> 1
+        self.assertEqual(lease.attempts, 1)
+        self.assertEqual(self.q.defer(lease.id, lease.token, delay=5), "deferred")
+        self.assertIsNone(self.q.lease(visibility_timeout=30))  # ещё отложено (delay)
+        self.clock.t += 6
+        again = self.q.lease(visibility_timeout=30)
+        self.assertEqual(again.attempts, 1)               # НЕ 2 — выдача не засчитана
+        self.assertEqual(self.q.depth(), 1)               # не в DLQ
+
+    def test_defer_stale_token_noop(self):
+        self.q.enqueue({"x": 1}, "o/r")
+        lease = self.q.lease(visibility_timeout=30)
+        self.assertEqual(self.q.defer(lease.id, "wrong", delay=5), "stale")
+
     def test_leased_message_hidden_until_visibility_timeout(self):
         self.q.enqueue({"x": 1}, "o/r")
         first = self.q.lease(visibility_timeout=30)

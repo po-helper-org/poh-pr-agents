@@ -144,6 +144,26 @@ class DurableQueue:
             self._db.commit()
             return "requeued"
 
+    def defer(self, message_id: int, token: str, *, delay: float) -> str:
+        """Backpressure: вернуть сообщение в очередь с задержкой, НЕ засчитывая
+        выдачу к порогу DLQ — откатываем attempts++ от lease. Для rate-limit
+        (сдерживание потока), не для сбоя: иначе троттлинг ложно уводит в DLQ.
+        'deferred' | 'stale' (токен устарел) | 'missing'."""
+        now = self._clock()
+        with self._lock:
+            m = self._db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+            if m is None:
+                return "missing"
+            if m["lease_token"] != token:
+                return "stale"
+            self._db.execute(
+                "UPDATE messages SET attempts=MAX(0, attempts-1), leased_until=NULL, "
+                "lease_token=NULL, available_at=? WHERE id=?",
+                (now + delay, message_id),
+            )
+            self._db.commit()
+            return "deferred"
+
     def _dead_letter(self, m, reason: str) -> None:
         """Перенести сообщение в dead-letter (вызывать под self._lock)."""
         self._db.execute(

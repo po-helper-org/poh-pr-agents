@@ -13,7 +13,7 @@ from typing import Callable, Optional
 from reliability import metrics
 from reliability.notifier import GitHubClient, notify_failure
 from reliability.queue import DurableQueue, Lease
-from reliability.state import State, StateStore, event_from_dict
+from reliability.state import Backpressure, State, StateStore, event_from_dict
 from reliability.supervisor import process
 
 
@@ -53,7 +53,8 @@ def _drive_to_dead_letter(store: StateStore, delivery_id: str) -> None:
 
 def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
                  client: GitHubClient, analyze, run_fn=run_with_timeout,
-                 task_timeout: float = 90, max_attempts: int = 5, backoff: float = 0) -> str:
+                 task_timeout: float = 90, max_attempts: int = 5, backoff: float = 0,
+                 backpressure_delay: float = 5.0) -> str:
     event = event_from_dict(lease.payload)
     force = event.event_type == "reconcile"
     reason: Optional[str] = None
@@ -65,12 +66,20 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
             queue.ack(lease.id, lease.token)
             metrics.incr("processed_ok")
             return "ack"
-        reason = "analysis_failed"
+        reason = result.error or "analysis_failed"   # точный класс сбоя → в коммент/метрику
+    except Backpressure:
+        # локальный rate limit — НЕ сбой: откладываем без счёта к DLQ и без коммента
+        # (иначе троттлинг штампует ложные провалы и воркер спинит вхолостую).
+        queue.defer(lease.id, lease.token, delay=backpressure_delay)
+        metrics.incr("backpressure_deferred")
+        return "deferred"
     except Exception as err:  # таймаут или неожиданная ошибка обработки
         reason = type(err).__name__
 
+    # backoff растёт с числом выдач — не долбим мёртвый Z.AI и не спиним вхолостую
+    effective_backoff = backoff * lease.attempts if backoff else 0
     outcome = queue.nack(lease.id, lease.token, max_attempts=max_attempts,
-                         backoff=backoff, reason=reason)
+                         backoff=effective_backoff, reason=reason)
     if outcome == "dead_letter":  # исчерпаны выдачи → эскалация (СТ-27)
         _drive_to_dead_letter(store, event.delivery_id)
         # Освобождаем захват бизнес-ключа: process() мог быть брошен по таймауту и
@@ -79,13 +88,14 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
         # но снимаем сразу, не заставляя сиблинга ждать своей следующей попытки.
         store.release_claim(event.business_key, event.delivery_id)
         metrics.incr("dead_letter_total")
-        notify_failure(client, event, RuntimeError(reason), lease.attempts, escalated=True)
+        notify_failure(client, event, reason, lease.attempts, escalated=True)  # точный класс сбоя
     return outcome
 
 
 def run_once(queue: DurableQueue, *, store: StateStore, client: GitHubClient, analyze,
              visibility_timeout: float = 120, task_timeout: float = 90,
-             max_attempts: int = 5, backoff: float = 0) -> bool:
+             max_attempts: int = 5, backoff: float = 0,
+             backpressure_delay: float = 5.0) -> bool:
     """Обработать одно сообщение; False если очередь пуста.
 
     Инвариант: visibility_timeout > task_timeout. Воркер бросает задачу по
@@ -98,7 +108,8 @@ def run_once(queue: DurableQueue, *, store: StateStore, client: GitHubClient, an
     if lease is None:
         return False
     handle_lease(lease, queue=queue, store=store, client=client, analyze=analyze,
-                 task_timeout=task_timeout, max_attempts=max_attempts, backoff=backoff)
+                 task_timeout=task_timeout, max_attempts=max_attempts, backoff=backoff,
+                 backpressure_delay=backpressure_delay)
     return True
 
 
@@ -124,6 +135,8 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
     # rate limit держит поток под лимитом. Добавить ключ/провайдера — расширить
     # список Provider(...). Таймаут попытки < worker task_timeout, чтобы сбой
     # засчитался цепи внутри gateway, а не съелся внешним таймаутом.
+    # ⚠️ rate limit ПРОЦЕССНЫЙ: при N воркерах суммарный RPS ≈ N×rate. Задавать
+    # RELIABILITY_LLM_RPS ≈ (лимит Z.AI) / (макс. число реплик воркера).
     rate = float(os.environ.get("RELIABILITY_LLM_RPS", "3"))
     burst = float(os.environ.get("RELIABILITY_LLM_BURST", "6"))
     gateway = Gateway(
@@ -136,7 +149,9 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
 
     run_forever(queue, store=store, client=client, analyze=gateway.run,
                 task_timeout=float(os.environ.get("RELIABILITY_TASK_TIMEOUT", "90")),
-                max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")))
+                max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")),
+                backoff=float(os.environ.get("RELIABILITY_BACKOFF", "10")),          # ×attempts на сбое
+                backpressure_delay=float(os.environ.get("RELIABILITY_BACKPRESSURE_DELAY", "5")))
 
 
 if __name__ == "__main__":  # pragma: no cover

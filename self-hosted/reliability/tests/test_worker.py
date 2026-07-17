@@ -3,7 +3,7 @@ import unittest
 
 from reliability import metrics
 from reliability.queue import DurableQueue
-from reliability.state import Event, State, StateStore, event_to_dict
+from reliability.state import Backpressure, Event, State, StateStore, event_to_dict
 from reliability.supervisor import process
 from reliability.worker import TaskTimeout, handle_lease, run_once
 
@@ -145,6 +145,28 @@ class TestWorker(unittest.TestCase):
         self._handle(FakeAnalyze(exc=RuntimeError("boom")), max_attempts=1)  # dead_letter
         self.assertEqual(self.store.state_of("d1"), State.DEAD_LETTER)
         self.assertIsNone(self.store.claim_holder(e.business_key))
+
+    def test_rate_limited_healthy_event_deferred_not_dead_lettered(self):
+        # HIGH-регрессия: здоровое событие, но лимитер пуст → backpressure. Оно
+        # должно ОТЛОЖИТЬСЯ, а не выжечь max_attempts и уйти в ложный DLQ с
+        # комментом о провале на PR, где анализ даже не запускался.
+        self._enqueue()
+        rate_limited = FakeAnalyze(exc=Backpressure("local rate limit"))
+        out = self._handle(rate_limited, max_attempts=1)   # порог=1 — поймали бы ложный DLQ
+        self.assertEqual(out, "deferred")
+        self.assertEqual(self.client.calls, [])            # НЕТ ложного коммента о провале
+        self.assertEqual(metrics.get("dead_letter_total"), 0)
+        self.assertEqual(len(self.queue.dead_letters()), 0)
+        self.assertEqual(metrics.get("backpressure_deferred"), 1)
+        self.assertEqual(self.queue.depth(), 1)            # осталось в очереди (отложено)
+
+    def test_dead_letter_comment_carries_real_failure_class(self):
+        # К-5: коммент/метрика отражают точный класс сбоя, не generic RuntimeError
+        self._enqueue()
+        self._handle(FakeAnalyze(exc=ValueError("z.ai 500")), max_attempts=1)
+        self.assertEqual(len(self.client.calls), 1)
+        _, _, _, body = self.client.calls[0]
+        self.assertIn("ValueError", body)                  # реальный класс, не "RuntimeError"
 
     def test_run_once_empty_returns_false(self):
         self.assertFalse(run_once(self.queue, store=self.store, client=self.client,

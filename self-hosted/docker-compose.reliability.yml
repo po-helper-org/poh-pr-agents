@@ -61,6 +61,8 @@ services:
       RELIABILITY_CB_RESET: "${RELIABILITY_CB_RESET:-30}"            # сек до пробного вызова
       RELIABILITY_ATTEMPT_TIMEOUT: "${RELIABILITY_ATTEMPT_TIMEOUT:-75}"  # < task_timeout
       RELIABILITY_TASK_TIMEOUT: "${RELIABILITY_TASK_TIMEOUT:-90}"
+      RELIABILITY_BACKOFF: "${RELIABILITY_BACKOFF:-10}"                 # сек ×attempts на сбое (не спиним)
+      RELIABILITY_BACKPRESSURE_DELAY: "${RELIABILITY_BACKPRESSURE_DELAY:-5}"  # сек отсрочки при rate-limit
     command: ["python", "-m", "reliability.worker"]
     volumes:
       - reliability-data:/data
