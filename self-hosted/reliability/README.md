@@ -44,29 +44,26 @@ cd self-hosted && python3 -m unittest discover -s reliability/tests -t . -v
 RS256-подпись, urllib, GitHub-порты) отмечены `pragma: no cover` и проверяются на
 первом деплое.
 
-## Как поднять (go live) — артефакты и шаги
+## Как поднять (go live)
 
-Готовые артефакты (в `self-hosted/`, отдельно от прод-`docker-compose.yml`):
-`Dockerfile.reliability` · `reliability-entrypoint.sh` · `docker-compose.reliability.yml`.
+**Прод-`docker-compose.yml` теперь ЗАПУСКАЕТ reliability-стек** (ingress/worker/sweeper),
+а не «голый» webhook pr-agent. Полная процедура, приёмка и откат — в
+[`../GO-LIVE.md`](../GO-LIVE.md); смоук-проверка — [`../scripts/smoke.sh`](../scripts/smoke.sh).
+
+Артефакты (в `self-hosted/`): `docker-compose.yml` (прод-стек) · `Dockerfile.reliability`
+· `reliability-entrypoint.sh` · `docker-compose.legacy-pr-agent.yml` (откат на прежнее поведение).
 
 Три процесса на общем томе с SQLite (state + queue):
-- **ingress** — `uvicorn reliability.app:app` (принимает webhook → durable queue);
-- **worker** — `python -m reliability.worker` (очередь → pr-agent → ack/nack, коммент при DLQ);
+- **ingress** — `uvicorn reliability.app:app` (webhook → durable queue; `/health`, `/metrics`);
+- **worker** — `python -m reliability.worker` (очередь → pr-agent через LLM Gateway → ack/nack, коммент при DLQ);
 - **sweeper** — `python -m reliability.sweeper_runner` (периодически дозапускает пропущенное/застрявшее).
 
-Шаги:
-1. `docker compose -f docker-compose.yml build` — собрать базу `pr-agent-github-app:local`.
-2. Заполнить env (та же `dokploy.env` + `RELIABILITY_REPOS="owner/repo,..."`).
-3. `docker compose -f docker-compose.reliability.yml up -d`.
-4. Webhook GitHub App → `/webhook` (ingress); healthcheck → `/health`. Обновить `origin`/webhook на новый адрес репо.
+Кратко: `docker compose up -d --build` (соберёт базу `pr-agent-base` → reliability-образ),
+env как раньше + `RELIABILITY_REPOS`, webhook GitHub App → `:3000/webhook`. Детали — `GO-LIVE.md`.
 
-⚠️ Это меняет прод-поведение — сначала стейджинг. `pragma: no cover` обёртки
-(`_real_invoke`, RS256-подпись, `make_list_open_prs`, раннеры) проверяются именно
-на этом смоуке (см. Deploy-чеклист ниже).
-
-⚠️ Живой прогон меняет поведение контейнера — применяйте на тесте до прод-переключения.
-`docker-compose.yml` намеренно НЕ тронут; переключение entrypoint — отдельный
-осознанный шаг (см. issue #1).
+⚠️ `pragma: no cover` обёртки (`_real_invoke`, RS256-подпись, GitHub-порты, раннеры)
+проверяются именно на первом смоуке (см. Deploy-чеклист ниже) — до прод-переключения
+webhook прогнать на тестовом PR. Откат: `docker-compose.legacy-pr-agent.yml`.
 
 ## Deploy-чеклист (риски go-live — проверить в стейджинге)
 

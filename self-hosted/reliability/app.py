@@ -45,7 +45,12 @@ def metrics_endpoint():  # pragma: no cover - тонкая обвязка над
     return Response(content=metrics.render_prometheus(gauges), media_type="text/plain")
 
 
+# Принимаем и новый `/webhook`, и легаси-путь pr-agent `/api/v1/github_webhooks`:
+# существующие GitHub App'ы (и register-app.html) настроены на легаси-путь, поэтому
+# go-live НЕ требует менять webhook-URL App'а — переключение прода бесшовно и легко
+# откатывается. Оба пути ведут в один обработчик.
 @app.post("/webhook")
+@app.post("/api/v1/github_webhooks")
 async def webhook(request: Request):
     raw = await request.body()
 

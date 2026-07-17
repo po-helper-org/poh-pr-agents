@@ -47,6 +47,14 @@ focus, which tools auto-run). Edits apply live, no redeploy.
 **5. Verify** — open a test PR → `describe/review/improve` appear within a minute;
 comment `/review` → it re-runs. Done.
 
+> **Go-live (issue #1):** `docker-compose.yml` now runs the reliability stack
+> (ingress/worker/sweeper), so failures surface as a visible PR comment instead of
+> silence. Ingress accepts **both** the legacy webhook path `/api/v1/github_webhooks`
+> and `/webhook` — no App webhook change needed. Healthcheck `/health`, metrics
+> `/metrics`. Set `RELIABILITY_REPOS` for the sweeper. Full procedure, smoke test and
+> rollback: [`GO-LIVE.md`](GO-LIVE.md). Roll back to the bare pr-agent webhook with
+> `docker-compose.legacy-pr-agent.yml`.
+
 ---
 
 ## The gotchas (all of these bit us — the config already handles them)
