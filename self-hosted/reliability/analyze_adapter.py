@@ -28,19 +28,31 @@ class PRAgentAnalyzer:
     проверяющий наличие ревью по head_sha. Здесь — только hard-failure с raise.
     """
 
-    def __init__(self, invoke: Callable[[str, str], None]):
+    def __init__(self, invoke: Callable[[str, str, str], None]):
         self._invoke = invoke
 
     def run(self, event: Event) -> None:
-        self._invoke(_pr_url(event), event.command)
+        # repo нужен, чтобы _real_invoke сминтил installation-токен для этого репо
+        # и отдал его pr-agent (иначе pr-agent не построит git-provider, СТ-шов).
+        self._invoke(_pr_url(event), event.command, event.repo)
 
 
 # --- реальные обёртки (pragma: no cover — проверяются на деплое) ---
 
-def _real_invoke(pr_url: str, command: str) -> None:  # pragma: no cover
+def _real_invoke(pr_url: str, command: str, repo: str) -> None:  # pragma: no cover
     import asyncio
 
     from pr_agent.agent.pr_agent import PRAgent
+    from pr_agent.config_loader import get_settings
+
+    # Мы зовём агента напрямую (не из webhook-сервера pr-agent), поэтому подставляем
+    # аутентификацию сами: минтим installation-токен GitHub App для репо и отдаём его
+    # pr-agent в user-режиме. Иначе app-режим без installation_id из вебхука падает на
+    # get_git_provider (ValueError: Failed to get git provider). Токен ~1 ч, кэшируется.
+    token = installation_token(repo)
+    settings = get_settings()
+    settings.set("github.deployment_type", "user")
+    settings.set("github.user_token", token)
     asyncio.run(PRAgent().handle_request(pr_url, command))
 
 

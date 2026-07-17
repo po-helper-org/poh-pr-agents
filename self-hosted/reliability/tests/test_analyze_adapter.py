@@ -13,14 +13,14 @@ class TestAnalyzer(unittest.TestCase):
     def test_pr_url(self):
         self.assertEqual(_pr_url(ev()), "https://github.com/o/r/pull/7")
 
-    def test_run_invokes_with_url_and_command(self):
+    def test_run_invokes_with_url_command_and_repo(self):
         calls = []
-        a = PRAgentAnalyzer(invoke=lambda url, cmd: calls.append((url, cmd)))
+        a = PRAgentAnalyzer(invoke=lambda url, cmd, repo: calls.append((url, cmd, repo)))
         a.run(ev())
-        self.assertEqual(calls, [("https://github.com/o/r/pull/7", "/review")])
+        self.assertEqual(calls, [("https://github.com/o/r/pull/7", "/review", "o/r")])
 
     def test_run_propagates_error(self):
-        def boom(url, cmd):
+        def boom(url, cmd, repo):
             raise RuntimeError("llm down")
         a = PRAgentAnalyzer(invoke=boom)
         with self.assertRaises(RuntimeError):  # → супервизор → dead-letter → коммент
