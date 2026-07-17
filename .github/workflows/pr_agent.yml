@@ -1,3 +1,9 @@
+# ⚠️ Этот репозиторий переведён на self-hosted отказоустойчивый PR-Agent
+# (webhook GitHub App, см. self-hosted/DEPLOY.md, issue #1). GitHub Actions-ревью
+# здесь ОТКЛЮЧЕНО, чтобы не дублировать self-hosted-ревьюер (иначе на PR два бота:
+# github-actions и App). Джобы сохранены как ШАБЛОН для форков — они выполняются
+# везде, КРОМЕ этого репозитория (guard `github.repository != ...` в каждом job).
+# Немедленно (до мержа этого guard в main) выключается кнопкой Actions → Disable workflow.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
@@ -5,7 +11,7 @@ on:
 
 jobs:
   ai-describe:
-    if: ${{ github.event.sender.type != 'Bot' }}
+    if: ${{ github.event.sender.type != 'Bot' && github.repository != 'po-helper-org/poh-pr-agents' }}
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -29,7 +35,7 @@ jobs:
           github_action_config.auto_improve: "false"
 
   ai-review:
-    if: ${{ github.event.sender.type != 'Bot' }}
+    if: ${{ github.event.sender.type != 'Bot' && github.repository != 'po-helper-org/poh-pr-agents' }}
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -53,7 +59,7 @@ jobs:
           github_action_config.auto_improve: "false"
 
   ai-suggest:
-    if: ${{ github.event.sender.type != 'Bot' }}
+    if: ${{ github.event.sender.type != 'Bot' && github.repository != 'po-helper-org/poh-pr-agents' }}
     runs-on: ubuntu-latest
     environment: production
     permissions:
