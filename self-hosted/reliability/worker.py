@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Callable, Optional
 
@@ -15,6 +16,8 @@ from reliability.notifier import GitHubClient, notify_failure
 from reliability.queue import DurableQueue, Lease
 from reliability.state import Backpressure, State, StateStore, event_from_dict
 from reliability.supervisor import process
+
+logger = logging.getLogger(__name__)  # reliability.worker → stdout (см. logging_setup)
 
 
 class TaskTimeout(Exception):
@@ -65,6 +68,9 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
         if result.state == State.DONE or result.skipped:
             queue.ack(lease.id, lease.token)
             metrics.incr("processed_ok")
+            logger.info("processed: delivery=%s command=%s → ack%s",
+                        event.delivery_id, event.command,
+                        " (skipped: already done/in-flight)" if result.skipped else "")
             return "ack"
         reason = result.error or "analysis_failed"   # точный класс сбоя → в коммент/метрику
     except Backpressure:
@@ -72,6 +78,8 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
         # (иначе троттлинг штампует ложные провалы и воркер спинит вхолостую).
         queue.defer(lease.id, lease.token, delay=backpressure_delay)
         metrics.incr("backpressure_deferred")
+        logger.info("processed: delivery=%s command=%s → deferred (rate limit, %ss)",
+                    event.delivery_id, event.command, backpressure_delay)
         return "deferred"
     except Exception as err:  # таймаут или неожиданная ошибка обработки
         reason = type(err).__name__
@@ -89,6 +97,11 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
         store.release_claim(event.business_key, event.delivery_id)
         metrics.incr("dead_letter_total")
         notify_failure(client, event, reason, lease.attempts, escalated=True)  # точный класс сбоя
+        logger.warning("processed: delivery=%s command=%s → DEAD-LETTER (reason=%s attempts=%d) "
+                       "— видимый коммент в PR", event.delivery_id, event.command, reason, lease.attempts)
+    else:
+        logger.info("processed: delivery=%s command=%s → %s (reason=%s attempts=%d)",
+                    event.delivery_id, event.command, outcome, reason, lease.attempts)
     return outcome
 
 
@@ -122,7 +135,8 @@ def run_forever(queue, *, store, client, analyze, idle_sleep=1.0, **kw):  # prag
 def main():  # pragma: no cover - deploy entrypoint (отдельный процесс воркера)
     import os
 
-    from reliability import analyze_adapter
+    from reliability import analyze_adapter, logging_setup
+    logging_setup.configure()  # reliability.* → stdout (логи обработки в контейнере worker)
     from reliability.gateway import CircuitBreaker, Gateway, Provider, TokenBucket
     from reliability.github_client import GitHubAppClient
 

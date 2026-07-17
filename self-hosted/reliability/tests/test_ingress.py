@@ -71,6 +71,19 @@ class TestHandleWebhook(unittest.TestCase):
         self.assertEqual(self._call(b), 200)
         self.assertEqual(self.sched.events, [])
 
+    def test_logs_arrival_and_accepted(self):
+        # в логах контейнера ingress: строка о приходе + результат с enqueued/deduped
+        with self.assertLogs("reliability.ingress", level="INFO") as cm:
+            self._call(pr_body())
+        joined = "\n".join(cm.output)
+        self.assertIn("webhook received: event=pull_request", joined)
+        self.assertIn("webhook accepted 200: event=pull_request parsed=2 enqueued=2 deduped=0", joined)
+
+    def test_logs_rejected_bad_signature(self):
+        with self.assertLogs("reliability.ingress", level="WARNING") as cm:
+            self._call(pr_body(), sig="sha256=bad")
+        self.assertIn("webhook rejected 401", "\n".join(cm.output))
+
 
 if __name__ == "__main__":
     unittest.main()

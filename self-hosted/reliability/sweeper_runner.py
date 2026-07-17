@@ -11,7 +11,8 @@ def main():  # pragma: no cover - deploy entrypoint
     import os
     import time
 
-    from reliability import analyze_adapter
+    from reliability import analyze_adapter, logging_setup
+    logging_setup.configure()  # reliability.* → stdout (логи свипера в контейнере sweeper)
     from reliability.github_client import GitHubAppClient
     from reliability.queue import DurableQueue
     from reliability.state import StateStore, event_to_dict
@@ -42,10 +43,18 @@ def main():  # pragma: no cover - deploy entrypoint
     has_completed_review = make_has_completed_review(store, verify=verify)
     list_open_prs = make_list_open_prs(client, repos)
 
+    import logging
+    log = logging.getLogger("reliability.sweeper")
+    log.info("sweeper started: repos=%s commands=%s interval=%ss", repos, commands, interval)
     while True:
-        sweep(store, list_open_prs=list_open_prs, has_completed_review=has_completed_review,
-              enqueue=enqueue, client=client, commands=commands,
-              stale_deadline=stale_deadline, max_attempts=max_attempts, max_cycles=max_cycles)
+        rep = sweep(store, list_open_prs=list_open_prs, has_completed_review=has_completed_review,
+                    enqueue=enqueue, client=client, commands=commands,
+                    stale_deadline=stale_deadline, max_attempts=max_attempts, max_cycles=max_cycles)
+        # тихо, если делать нечего; строка — только когда реально что-то сделали
+        if rep.reconciled or rep.requeued or rep.dead_lettered or rep.escalated:
+            log.info("sweep: reconciled=%d requeued=%d dead_lettered=%d escalated=%d",
+                     len(rep.reconciled), len(rep.requeued),
+                     len(rep.dead_lettered), len(rep.escalated))
         time.sleep(interval)
 
 
