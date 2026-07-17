@@ -53,7 +53,8 @@ comment `/review` → it re-runs. Done.
 > and `/webhook` — no App webhook change needed. Healthcheck `/health`, metrics
 > `/metrics`. Set `RELIABILITY_REPOS` for the sweeper. Full procedure, smoke test and
 > rollback: [`GO-LIVE.md`](GO-LIVE.md). Roll back to the bare pr-agent webhook with
-> `docker-compose.legacy-pr-agent.yml`.
+> `docker-compose.legacy-pr-agent.yml`. Architecture diagrams + failure-troubleshooting
+> playbook: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
