@@ -57,6 +57,25 @@ class GitHubAppClient:
                 return found
             page += 1
 
+    def list_installation_repos(self, installation_token: str) -> list:
+        """Все репозитории, доступные установке App (org-wide свипер). Пагинация.
+        Токен — installation-уровня (см. token.token_for), не привязан к репо."""
+        out, page = [], 1
+        headers = {"Authorization": f"Bearer {installation_token}",
+                   "Accept": "application/vnd.github+json",
+                   "User-Agent": "pr-agent-reliability"}
+        while True:
+            s, b = self._transport(
+                "GET", f"{self._api}/installation/repositories?per_page=100&page={page}",
+                None, headers)
+            if s >= 300:
+                raise RuntimeError(f"list installation repos {s}: {b[:200]!r}")
+            repos = json.loads(b).get("repositories", [])
+            out.extend(r["full_name"] for r in repos)
+            if len(repos) < 100:
+                return out
+            page += 1
+
     def get_pull_head_sha(self, repo: str, number: int) -> str:
         """head SHA открытого PR по номеру — для обогащения issue_comment-событий
         (в их payload sha нет). Пусто, если номер — issue, а не PR (404), или ошибка:

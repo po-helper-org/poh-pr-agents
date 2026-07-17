@@ -88,3 +88,11 @@ def installation_token(repo: str) -> str:  # pragma: no cover
     if _provider is None:
         _provider = _default_provider()
     return _provider.get(repo)
+
+
+def provider() -> InstallationTokenProvider:  # pragma: no cover
+    """Тот же кэширующий провайдер (для org-wide обхода свипером: list_installations)."""
+    global _provider
+    if _provider is None:
+        _provider = _default_provider()
+    return _provider

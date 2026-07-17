@@ -135,5 +135,27 @@ class TestHasBotActivity(unittest.TestCase):
         self.assertEqual(t.methods(), ["GET", "GET"])
 
 
+class TestListInstallationRepos(unittest.TestCase):
+    def _client(self, pages):
+        # /installation/repositories отдаёт {"repositories":[...]} постранично
+        def transport(method, url, data, headers):
+            self.assertEqual(method, "GET")
+            self.assertIn("/installation/repositories", url)
+            p = int(re.search(r"[?&]page=(\d+)", url).group(1))
+            items = pages[p - 1] if p - 1 < len(pages) else []
+            return 200, json.dumps({"repositories": items}).encode()
+        return GitHubAppClient(token_provider=lambda repo: "x", transport=transport)
+
+    def test_collects_full_names(self):
+        c = self._client([[{"full_name": "org/a"}, {"full_name": "org/b"}]])
+        self.assertEqual(c.list_installation_repos("inst-tok"), ["org/a", "org/b"])
+
+    def test_paginates(self):
+        page1 = [{"full_name": f"org/r{i}"} for i in range(100)]
+        page2 = [{"full_name": "org/last"}]
+        c = self._client([page1, page2])
+        self.assertEqual(len(c.list_installation_repos("t")), 101)
+
+
 if __name__ == "__main__":
     unittest.main()

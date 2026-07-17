@@ -66,6 +66,26 @@ class InstallationTokenProvider:
         data = json.loads(b)
         return data["token"], self._parse_expiry(data.get("expires_at"))
 
+    def list_installations(self) -> list:
+        """Все установки App (app JWT) — для org-wide обхода свипером. Одна страница
+        (у App на одну орг обычно одна установка); при росте — добить пагинацию."""
+        jwt = self._app_jwt()
+        s, b = self._transport("GET", f"{self._api}/app/installations?per_page=100",
+                               self._headers(jwt), None)
+        if s >= 300:
+            raise RuntimeError(f"list installations failed: {s}")
+        return json.loads(b)
+
+    def token_for(self, installation_id) -> str:
+        """Installation-токен по id установки (без привязки к конкретному репо)."""
+        jwt = self._app_jwt()
+        s, b = self._transport(
+            "POST", f"{self._api}/app/installations/{installation_id}/access_tokens",
+            self._headers(jwt), b"")
+        if s >= 300:
+            raise RuntimeError(f"token exchange failed: {s}")
+        return json.loads(b)["token"]
+
     def _parse_expiry(self, s: Optional[str]) -> float:
         if not s:
             return self._clock() + 3000

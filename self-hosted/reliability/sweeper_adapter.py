@@ -62,3 +62,18 @@ def make_list_open_prs(client, repos):  # pragma: no cover - реальные в
             prs.extend(parse_open_prs(client.list_open_pulls(repo), repo))
         return prs
     return list_open_prs
+
+
+def make_list_open_prs_all(client, provider):
+    """org-wide бэкстоп: обходит ВСЕ установки App и их репозитории (вкл. новые и
+    несколько орг/аккаунтов сразу). Используется, когда RELIABILITY_REPOS пуст —
+    список репо не задаётся руками, App сам определяет охват через свои установки.
+    `client`/`provider` инъектируются → оркестрация тестируема без сети."""
+    def list_open_prs():
+        prs = []
+        for inst in provider.list_installations():
+            token = provider.token_for(inst["id"])
+            for repo in client.list_installation_repos(token):
+                prs.extend(parse_open_prs(client.list_open_pulls(repo), repo))
+        return prs
+    return list_open_prs

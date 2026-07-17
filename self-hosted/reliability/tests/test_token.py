@@ -76,6 +76,21 @@ class TestInstallationTokenProvider(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             p.get("o/r")
 
+    def test_list_installations(self):
+        def tr(method, url, headers, data):
+            self.assertIn("/app/installations", url)
+            return 200, json.dumps([{"id": 11}, {"id": 22}]).encode()
+        p = InstallationTokenProvider("a", "P", tr, signer, clock=Clock())
+        self.assertEqual([i["id"] for i in p.list_installations()], [11, 22])
+
+    def test_token_for_installation(self):
+        def tr(method, url, headers, data):
+            self.assertEqual(method, "POST")
+            self.assertIn("/app/installations/22/access_tokens", url)
+            return 201, json.dumps({"token": "ghs_inst22"}).encode()
+        p = InstallationTokenProvider("a", "P", tr, signer, clock=Clock())
+        self.assertEqual(p.token_for(22), "ghs_inst22")
+
 
 if __name__ == "__main__":
     unittest.main()

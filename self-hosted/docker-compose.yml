@@ -96,7 +96,7 @@ services:
       - ingress
     environment:
       <<: *reliability-env
-      RELIABILITY_REPOS: "${RELIABILITY_REPOS}"                      # "owner/repo,owner/repo2" (обязателен для свипера)
+      RELIABILITY_REPOS: "${RELIABILITY_REPOS}"                      # "owner/repo,..." — конкретные репо; ПУСТО → org-wide (все установки App)
       RELIABILITY_COMMANDS: "${RELIABILITY_COMMANDS:-/describe,/review}"
       RELIABILITY_SWEEP_INTERVAL: "${RELIABILITY_SWEEP_INTERVAL:-300}"
       RELIABILITY_STALE_DEADLINE: "${RELIABILITY_STALE_DEADLINE:-1800}"

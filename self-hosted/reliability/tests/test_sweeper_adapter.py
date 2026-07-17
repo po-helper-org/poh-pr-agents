@@ -2,7 +2,11 @@
 import unittest
 
 from reliability.sweeper import OpenPR
-from reliability.sweeper_adapter import make_has_completed_review, parse_open_prs
+from reliability.sweeper_adapter import (
+    make_has_completed_review,
+    make_list_open_prs_all,
+    parse_open_prs,
+)
 from reliability.state import Event, State, StateStore
 
 
@@ -29,6 +33,49 @@ class TestHasCompletedReview(unittest.TestCase):
         self.assertTrue(hcr("o/r", 7, "abc", "/review"))
         self.assertFalse(hcr("o/r", 7, "def", "/review"))     # иной head_sha
         self.assertFalse(hcr("o/r", 7, "abc", "/describe"))   # иная команда
+
+
+class FakeProvider:
+    def __init__(self, installations):
+        self.installations = installations
+        self.token_calls = []
+
+    def list_installations(self):
+        return self.installations
+
+    def token_for(self, inst_id):
+        self.token_calls.append(inst_id)
+        return f"tok-{inst_id}"
+
+
+class FakeClient:
+    def __init__(self, repos_by_token, pulls_by_repo):
+        self.repos_by_token = repos_by_token
+        self.pulls_by_repo = pulls_by_repo
+
+    def list_installation_repos(self, token):
+        return self.repos_by_token[token]
+
+    def list_open_pulls(self, repo):
+        return self.pulls_by_repo.get(repo, [])
+
+
+class TestListOpenPrsAll(unittest.TestCase):
+    def test_walks_all_installations_and_repos(self):
+        # две установки (две орг/аккаунта) → все их репозитории обходятся
+        provider = FakeProvider([{"id": 11}, {"id": 22}])
+        client = FakeClient(
+            repos_by_token={"tok-11": ["po-helper-org/a", "po-helper-org/b"],
+                            "tok-22": ["kibarik/mts-po-workspace"]},
+            pulls_by_repo={
+                "po-helper-org/a": [{"number": 1, "head": {"sha": "s1"}}],
+                "po-helper-org/b": [],
+                "kibarik/mts-po-workspace": [{"number": 9, "head": {"sha": "s9"}}],
+            })
+        prs = make_list_open_prs_all(client, provider)()
+        self.assertEqual(sorted((p.repo, p.number) for p in prs),
+                         [("kibarik/mts-po-workspace", 9), ("po-helper-org/a", 1)])
+        self.assertEqual(provider.token_calls, [11, 22])  # токен на каждую установку
 
 
 class TestSwallowedFailureVerify(unittest.TestCase):

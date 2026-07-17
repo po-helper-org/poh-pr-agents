@@ -21,6 +21,7 @@ def main():  # pragma: no cover - deploy entrypoint
         make_github_review_verifier,
         make_has_completed_review,
         make_list_open_prs,
+        make_list_open_prs_all,
     )
 
     store = StateStore(os.environ.get("RELIABILITY_DB", "/data/reliability.db"))
@@ -41,11 +42,20 @@ def main():  # pragma: no cover - deploy entrypoint
     verify = (make_github_review_verifier(client)
               if os.environ.get("RELIABILITY_VERIFY_GITHUB") == "1" else None)
     has_completed_review = make_has_completed_review(store, verify=verify)
-    list_open_prs = make_list_open_prs(client, repos)
 
     import logging
     log = logging.getLogger("reliability.sweeper")
-    log.info("sweeper started: repos=%s commands=%s interval=%ss", repos, commands, interval)
+    # RELIABILITY_REPOS задан → сверяем ровно эти репо; пуст → org-wide: App сам
+    # определяет охват через свои установки (все репо всех орг/аккаунтов, где он
+    # установлен, включая новые). Живые PR-события и так идут по webhook для любого
+    # установленного репо — это лишь бэкстоп на пропущенные webhook'и.
+    if repos:
+        list_open_prs = make_list_open_prs(client, repos)
+        log.info("sweeper started: repos=%s commands=%s interval=%ss", repos, commands, interval)
+    else:
+        list_open_prs = make_list_open_prs_all(client, analyze_adapter.provider())
+        log.info("sweeper started: ORG-WIDE (RELIABILITY_REPOS пуст — обход всех установок App) "
+                 "commands=%s interval=%ss", commands, interval)
     while True:
         rep = sweep(store, list_open_prs=list_open_prs, has_completed_review=has_completed_review,
                     enqueue=enqueue, client=client, commands=commands,
