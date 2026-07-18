@@ -29,6 +29,10 @@ num_code_suggestions = 0        # suggestions come from the /improve tool
 
 [pr_description]
 publish_labels = true
+# Фаза 0 (issue #1): снижаем всплеск параллельных LLM-вызовов на describe, чтобы
+# уменьшить частоту 429 на единственном ключе Z.AI. Все команды сохраняются.
+async_ai_calls = false
+max_ai_calls = 2
 
 [pr_code_suggestions]
 num_code_suggestions = 4

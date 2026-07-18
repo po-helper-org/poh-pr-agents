@@ -1,5 +1,10 @@
 # Self-hosted PR-Agent (GLM-5) as a GitHub App — Dokploy runbook
 
+> 👉 **Новичку — начни с [`DEPLOY.md`](DEPLOY.md)**: сквозная инструкция от нуля до
+> работы под нагрузкой (создание App, секреты, Dokploy Compose, проверка, масштаб).
+> Этот файл — справочник подводных камней (traefik, env, PEM, регион), на который
+> `DEPLOY.md` ссылается.
+
 Runs [PR-Agent](https://github.com/qodo-ai/pr-agent) as a **webhook GitHub App**
 on your own box, with **GLM-5 via Z.AI**. Use this instead of the GitHub Actions
 workflow when Actions can't run — e.g. the account is **billing-locked**
@@ -46,6 +51,15 @@ focus, which tools auto-run). Edits apply live, no redeploy.
 
 **5. Verify** — open a test PR → `describe/review/improve` appear within a minute;
 comment `/review` → it re-runs. Done.
+
+> **Go-live (issue #1):** `docker-compose.yml` now runs the reliability stack
+> (ingress/worker/sweeper), so failures surface as a visible PR comment instead of
+> silence. Ingress accepts **both** the legacy webhook path `/api/v1/github_webhooks`
+> and `/webhook` — no App webhook change needed. Healthcheck `/health`, metrics
+> `/metrics`. Set `RELIABILITY_REPOS` for the sweeper. Full procedure, smoke test and
+> rollback: [`GO-LIVE.md`](GO-LIVE.md). Roll back to the bare pr-agent webhook with
+> `docker-compose.legacy-pr-agent.yml`. Architecture diagrams + failure-troubleshooting
+> playbook: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
@@ -98,3 +112,31 @@ HTTP only** (its HTTPS is a self-signed `TRAEFIK DEFAULT CERT`). So:
 - **Diagnose auth from your laptop**: with the App ID + `.pem` you can mint an app
   JWT and query `GET /app`, `GET /app/installations`, `GET /app/hook/deliveries`
   to see exactly what GitHub sent and what the server returned.
+
+## Надёжность: тихие падения (Фаза 0)
+
+Симптом: доставки вебхуков зелёные (`200`), `/describe` иногда проходит, но
+`/review` / `/improve` **молча не появляются** и алерта нет. Причина архитектурная —
+вебхук отвечает `200` сразу, работа идёт в фоне, а при таймауте/ошибке LLM-вызова
+pr-agent **пишет ошибку в лог и ничего не постит**. Диагностика: логи контейнера
+сразу после «зависшего» вызова (`grep -iE "timeout|ratelimit|429|APIConnection|exception"`)
+и квота ключа Z.AI.
+
+Фаза 0 (issue #1, `SCALE-PLAN.md`) уже применена в этом compose/`.pr_agent.toml`:
+
+| Изменение | Где | Что даёт |
+|---|---|---|
+| `ai_timeout` 120 → 90 (env `CONFIG_AI_TIMEOUT`) | `.secrets.toml [config]` | зависший вызов падает за ~90 c, не держит воркер бесконечно |
+| `fallback_models` = модель ×2 | `.secrets.toml [config]` | один авто-ретрай на транзиентной ошибке |
+| `async_ai_calls=false`, `max_ai_calls=2` | `.pr_agent.toml [pr_description]` | меньше всплеск параллельных вызовов → реже 429 |
+| Docker healthcheck | `docker-compose.yml` | Swarm пересоздаёт мёртвый процесс |
+
+**Что Фаза 0 НЕ делает (честно):** конфиг не может сделать провал видимым в PR —
+upstream проглатывает исключение. Видимый комментарий при провале, детект
+логического зависания и гарантированное eventual-завершение приходят с wrapper'ом
+и reconciliation sweeper'ом (Фазы 2–3, issue #1). Внешний dead-man switch —
+issue #2.
+
+**Ограничение:** единственный ключ Z.AI ⇒ настоящего кросс-провайдерного резерва
+нет; аутейдж самого Z.AI Фаза 0 не переживёт (только ретраит). Второй провайдер —
+предусловие Фазы 4.

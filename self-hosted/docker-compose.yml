@@ -1,72 +1,109 @@
-# PR-Agent GitHub App (GLM-5) — self-hosted, for Dokploy "Compose" service.
+# PR-Agent RELIABILITY stack (GLM-5, self-hosted) — ПРОД-конфиг для Dokploy "Compose".
 #
-# Why this exists: if GitHub Actions is unavailable (billing lock, no minutes,
-# org policy) the workflow in ../.github/workflows never runs. This runs the same
-# PR-Agent as a webhook GitHub App on your own box — no Actions involved.
+# ⚠️ GO-LIVE: с этого момента прод-деплой запускает отказоустойчивый слой
+# `reliability/` (ingress → durable queue → worker → sweeper), а НЕ «голый»
+# webhook-сервер pr-agent. Цель — «не молчать»: любой сбой/зависание Z.AI даёт
+# видимый коммент в PR, а не тишину (issue #1, СТ-1..35). Прежнее поведение —
+# в docker-compose.legacy-pr-agent.yml (быстрый откат). Полная процедура и
+# приёмка — в GO-LIVE.md.
 #
-# Set these in Dokploy → Environment (all plain, single-line — see SETUP.md):
-#   OPENAI_KEY               z.ai GLM-5 API key                 (required)
-#   GITHUB_APP_ID            the App's numeric ID               (required)
-#   GITHUB_WEBHOOK_SECRET    the App's webhook secret           (required)
-#   GITHUB_PRIVATE_KEY_B64   base64 of the App's .pem, one line (required)
-#   OPENAI_API_BASE          LLM endpoint  (optional, default z.ai)
-#   CONFIG_MODEL             model         (optional, default openai/glm-5)
-#   CONFIG_MAX_TOKENS        ctx limit     (optional, default 128000)
+# Env в Dokploy → Environment (single-line; см. SETUP.md). Обязательные:
+#   OPENAI_KEY  GITHUB_APP_ID  GITHUB_WEBHOOK_SECRET  GITHUB_PRIVATE_KEY_B64
+#   RELIABILITY_REPOS="owner/repo,owner/repo2"   (для sweeper; иначе он бездействует)
+# Остальное — с дефолтами (LLM endpoint, модель, лимиты, gateway/sweeper-настройки).
 #
-# Everything sensitive is written into pr-agent's .secrets.toml AT STARTUP by the
-# entrypoint. This is deliberate — see the gotchas in SETUP.md: pr-agent ignores
-# dotted env vars (OPENAI.KEY, CONFIG.MODEL, GITHUB.APP_ID) in this setup,
-# [config]/[openai] can't come from the repo .pr_agent.toml (host-restricted),
-# a multiline PEM breaks in env, and Dokploy File Mounts don't land in the
-# container path. Writing the file ourselves sidesteps all of it.
+# Три процесса делят один volume с SQLite (state + queue):
+#   ingress  — принимает webhook, кладёт в очередь (порт 3000: /webhook /health /metrics)
+#   worker   — очередь → pr-agent (через LLM Gateway) → ack/nack, при DLQ коммент в PR
+#   sweeper  — периодически дозапускает пропущенное/застрявшее
+#
+# Предусловие сборки: образ базового pr-agent (`pr-agent-github-app:local`) строится
+# сервисом `pr-agent-base` (одноразовый, только ради образа); reliability-образ
+# наследуется от него (Dockerfile.reliability). `docker compose up -d --build`
+# соберёт base первым (depends_on) — образ будет готов до сборки reliability.
+
+x-reliability-env: &reliability-env
+  OPENAI_KEY: "${OPENAI_KEY}"
+  OPENAI_API_BASE: "${OPENAI_API_BASE:-}"
+  CONFIG_MODEL: "${CONFIG_MODEL:-}"
+  CONFIG_MAX_TOKENS: "${CONFIG_MAX_TOKENS:-}"
+  CONFIG_AI_TIMEOUT: "${CONFIG_AI_TIMEOUT:-90}"
+  GITHUB_APP_ID: "${GITHUB_APP_ID}"
+  GITHUB_WEBHOOK_SECRET: "${GITHUB_WEBHOOK_SECRET}"
+  GITHUB_PRIVATE_KEY_B64: "${GITHUB_PRIVATE_KEY_B64}"
+  RELIABILITY_DB: "/data/reliability.db"
+  RELIABILITY_QUEUE: "/data/queue.db"
+  RELIABILITY_MAX_ATTEMPTS: "${RELIABILITY_MAX_ATTEMPTS:-5}"
+
 services:
-  pr-agent:
+  # Одноразовая сборка базового образа pr-agent из upstream. Не «служит» — только
+  # тегирует pr-agent-github-app:local, от которого наследуется reliability-образ.
+  # /bin/true → контейнер сразу завершается (restart: no), образ остаётся.
+  pr-agent-base:
     build:
-      # Build the github_app image straight from upstream — no local clone needed.
       context: https://github.com/qodo-ai/pr-agent.git
       dockerfile: docker/Dockerfile
       target: github_app
     image: pr-agent-github-app:local
+    entrypoint: ["/bin/true"]
+    restart: "no"
+
+  ingress:
+    build:
+      context: .
+      dockerfile: Dockerfile.reliability
+    image: pr-agent-reliability:local
     restart: unless-stopped
-    environment:
-      - PORT=3000
-      - "OPENAI_KEY=${OPENAI_KEY}"
-      - "OPENAI_API_BASE=${OPENAI_API_BASE:-}"
-      - "CONFIG_MODEL=${CONFIG_MODEL:-}"
-      - "CONFIG_MAX_TOKENS=${CONFIG_MAX_TOKENS:-}"
-      - "GITHUB_APP_ID=${GITHUB_APP_ID}"
-      - "GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}"
-      - "GITHUB_PRIVATE_KEY_B64=${GITHUB_PRIVATE_KEY_B64}"
-    # $$ escapes compose interpolation so values are read from the container env
-    # at runtime; ${VAR:-default} supplies fallbacks. Writes the FULL [github],
-    # [openai] and [config] tables (pr-agent replaces a section wholesale when it
-    # loads .secrets.toml, so partial tables lose their other keys).
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        mkdir -p /app/pr_agent/settings
-        {
-          printf '[openai]\n'
-          printf 'key = "%s"\n' "$$OPENAI_KEY"
-          printf 'api_base = "%s"\n' "$${OPENAI_API_BASE:-https://api.z.ai/api/coding/paas/v4}"
-          printf '\n[config]\n'
-          printf 'git_provider = "github"\n'
-          printf 'model = "%s"\n' "$${CONFIG_MODEL:-openai/glm-5}"
-          printf 'model_turbo = "%s"\n' "$${CONFIG_MODEL:-openai/glm-5}"
-          printf 'fallback_models = ["%s"]\n' "$${CONFIG_MODEL:-openai/glm-5}"
-          printf 'custom_model_max_tokens = %s\n' "$${CONFIG_MAX_TOKENS:-128000}"
-          printf '\n[github]\n'
-          printf 'deployment_type = "app"\n'
-          printf 'app_id = "%s"\n' "$$GITHUB_APP_ID"
-          printf 'webhook_secret = "%s"\n' "$$GITHUB_WEBHOOK_SECRET"
-          printf 'private_key = """\n'
-          printf '%s' "$$GITHUB_PRIVATE_KEY_B64" | base64 -d
-          printf '\n"""\n'
-        } > /app/pr_agent/settings/.secrets.toml
-        exec python -m gunicorn -k uvicorn.workers.UvicornWorker \
-          -c pr_agent/servers/gunicorn_config.py --forwarded-allow-ips '*' \
-          pr_agent.servers.github_app:app
+    depends_on:
+      - pr-agent-base            # гарантирует, что базовый образ собран раньше
+    environment: *reliability-env
+    command: ["uvicorn", "reliability.app:app", "--host", "0.0.0.0", "--port", "3000"]
+    volumes:
+      - reliability-data:/data
     expose:
-      - "3000"
+      - "3000"                   # webhook GitHub App → :3000/webhook ; healthcheck → /health ; метрики → /metrics
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 3000), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    image: pr-agent-reliability:local
+    restart: unless-stopped
+    depends_on:
+      - ingress                  # образ уже собран сервисом ingress
+    environment:
+      <<: *reliability-env
+      # LLM Gateway (СТ-19..24): rate limit + circuit breaker вокруг Z.AI
+      RELIABILITY_LLM_RPS: "${RELIABILITY_LLM_RPS:-3}"                 # запросов/сек к LLM (процессный! ≈ лимит/реплик)
+      RELIABILITY_LLM_BURST: "${RELIABILITY_LLM_BURST:-6}"            # ёмкость всплеска
+      RELIABILITY_CB_THRESHOLD: "${RELIABILITY_CB_THRESHOLD:-5}"      # сбоев подряд → размыкание
+      RELIABILITY_CB_RESET: "${RELIABILITY_CB_RESET:-30}"            # сек до пробного вызова
+      RELIABILITY_ATTEMPT_TIMEOUT: "${RELIABILITY_ATTEMPT_TIMEOUT:-75}"  # < task_timeout
+      RELIABILITY_TASK_TIMEOUT: "${RELIABILITY_TASK_TIMEOUT:-90}"
+      RELIABILITY_BACKOFF: "${RELIABILITY_BACKOFF:-10}"                 # сек ×attempts на сбое (не спиним)
+      RELIABILITY_BACKPRESSURE_DELAY: "${RELIABILITY_BACKPRESSURE_DELAY:-5}"  # сек отсрочки при rate-limit
+    command: ["python", "-m", "reliability.worker"]
+    volumes:
+      - reliability-data:/data
+
+  sweeper:
+    image: pr-agent-reliability:local
+    restart: unless-stopped
+    depends_on:
+      - ingress
+    environment:
+      <<: *reliability-env
+      RELIABILITY_REPOS: "${RELIABILITY_REPOS}"                      # "owner/repo,..." — конкретные репо; ПУСТО → org-wide (все установки App)
+      RELIABILITY_COMMANDS: "${RELIABILITY_COMMANDS:-/describe,/review}"
+      RELIABILITY_SWEEP_INTERVAL: "${RELIABILITY_SWEEP_INTERVAL:-300}"
+      RELIABILITY_STALE_DEADLINE: "${RELIABILITY_STALE_DEADLINE:-1800}"
+      RELIABILITY_VERIFY_GITHUB: "${RELIABILITY_VERIFY_GITHUB:-}"    # "1" — детект проглоченного сбоя (тюнится на смоуке)
+    command: ["python", "-m", "reliability.sweeper_runner"]
+    volumes:
+      - reliability-data:/data
+
+volumes:
+  reliability-data:
