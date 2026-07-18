@@ -98,15 +98,39 @@ class DurableQueue:
                 if row is None:
                     return None
                 m = self._db.execute("SELECT * FROM messages WHERE id=?", (int(row["mid"]),)).fetchone()
-                # poison-guard: max_attempts выдач без ack → в DLQ, не выдаём (СТ-9)
+                if m is None:
+                    continue  # строку забрали/удалили между выбором и чтением — перевыбрать
+                # poison-guard: max_attempts выдач без ack → в DLQ, не выдаём (СТ-9).
+                # Забираем строку атомарно (условный DELETE); переводит в DLQ ровно
+                # один процесс, даже если кандидата увидели несколько реплик.
                 if max_attempts is not None and int(m["attempts"]) >= max_attempts:
-                    self._dead_letter(m, "max_receives")
+                    claimed_dl = self._db.execute(
+                        "DELETE FROM messages WHERE id=? AND (leased_until IS NULL OR leased_until<=?) "
+                        "AND available_at<=?", (m["id"], now, now),
+                    ).rowcount
+                    if claimed_dl:
+                        self._db.execute(
+                            "INSERT OR IGNORE INTO dead_letters(id,partition,payload,attempts,reason,dead_at)"
+                            " VALUES(?,?,?,?,?,?)",
+                            (m["id"], m["partition"], m["payload"], m["attempts"], "max_receives", now),
+                        )
+                        self._db.commit()
                     continue
+                # Атомарный захват: единственный кросс-процессный барьер. threading.Lock
+                # сериализует только внутри процесса — при нескольких репликах воркера
+                # (СТ-5/17, prod масштабирует worker) SELECT→UPDATE был бы TOCTOU и две
+                # реплики лизнули бы одно сообщение → двойная обработка. Условие в UPDATE
+                # (SQLite сериализует запись) отдаёт строку ровно одному; проигравший
+                # перевыбирает кандидата (rowcount==0).
                 token = uuid.uuid4().hex
-                self._db.execute(
-                    "UPDATE messages SET attempts=attempts+1, leased_until=?, lease_token=? WHERE id=?",
-                    (now + visibility_timeout, token, m["id"]),
-                )
+                claimed = self._db.execute(
+                    "UPDATE messages SET attempts=attempts+1, leased_until=?, lease_token=? "
+                    "WHERE id=? AND (leased_until IS NULL OR leased_until<=?) AND available_at<=?",
+                    (now + visibility_timeout, token, m["id"], now, now),
+                ).rowcount
+                if not claimed:
+                    self._db.commit()
+                    continue  # опередила другая реплика — берём следующего кандидата
                 self._db.execute(
                     "INSERT INTO partition_service(partition,last_served) VALUES(?,?) "
                     "ON CONFLICT(partition) DO UPDATE SET last_served=?",
@@ -167,7 +191,7 @@ class DurableQueue:
     def _dead_letter(self, m, reason: str) -> None:
         """Перенести сообщение в dead-letter (вызывать под self._lock)."""
         self._db.execute(
-            "INSERT INTO dead_letters(id,partition,payload,attempts,reason,dead_at)"
+            "INSERT OR IGNORE INTO dead_letters(id,partition,payload,attempts,reason,dead_at)"
             " VALUES(?,?,?,?,?,?)",
             (m["id"], m["partition"], m["payload"], m["attempts"], reason, self._clock()),
         )

@@ -1,4 +1,8 @@
 """СТ-6..9: durable queue — at-least-once, visibility-timeout, DLQ, честность, фенсинг."""
+import os
+import shutil
+import tempfile
+import threading
 import unittest
 
 from reliability.queue import DurableQueue
@@ -128,6 +132,53 @@ class TestDurableQueue(unittest.TestCase):
         self.q.enqueue({"n": 3}, "B")
         order = [self.q.lease(visibility_timeout=30).partition for _ in range(3)]
         self.assertEqual(order, ["A", "B", "A"])  # B не в конце
+
+
+class TestConcurrentLeaseAcrossReplicas(unittest.TestCase):
+    """СТ-5/17: несколько worker-РЕПЛИК (отдельные процессы = отдельные соединения к
+    одному файлу очереди) не должны лизнуть одно сообщение дважды. threading.Lock
+    сериализует только внутри процесса; кросс-процессный барьер — атомарный
+    условный UPDATE в lease. Регресс на TOCTOU, найденный нагрузочным прогоном."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="q-race-")
+        self.path = os.path.join(self.dir, "queue.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_no_message_leased_twice_under_replicas(self):
+        seed = DurableQueue(self.path)
+        n = 500
+        for i in range(n):
+            seed.enqueue({"i": i}, f"p{i % 8}")  # 8 партиций → выборка кандидата ветвится
+
+        leased_by = []          # (message_id) — должен быть каждый ровно один раз
+        lock = threading.Lock()
+        start = threading.Barrier(6)
+
+        def drain():
+            q = DurableQueue(self.path)   # своя реплика (своё соединение, свой Lock)
+            start.wait()                  # максимум перекрытия
+            while True:
+                lease = q.lease(visibility_timeout=60, max_attempts=10)
+                if lease is None:
+                    if q.depth() == 0:
+                        return
+                    continue              # временно пусто (лизнуто другими) — ещё раз
+                with lock:
+                    leased_by.append(lease.id)
+                self.assertTrue(q.ack(lease.id, lease.token))  # наш токен — ack наш
+
+        threads = [threading.Thread(target=drain) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(leased_by), n)                 # ни одной потери
+        self.assertEqual(len(set(leased_by)), n)            # ни одного двойного захвата
+        self.assertEqual(seed.depth(), 0)                   # очередь осушена
 
 
 if __name__ == "__main__":
