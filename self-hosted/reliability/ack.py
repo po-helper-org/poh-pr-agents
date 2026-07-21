@@ -60,3 +60,28 @@ def publish_ack(client, repo: str, number: int, weight: DiffWeight, plan: ChunkP
     body = build_ack_comment(weight, plan, **kw)
     client.upsert_comment(repo, number, ACK_MARKER, body)
     return body
+
+
+def build_progress_comment(weight: DiffWeight, plan: ChunkPlan, *, done: int,
+                           failed: int = 0) -> str:
+    """Инкрементальный прогресс (ФТ-APRP-9): правит тот же ack-коммент по маркеру."""
+    total = len(plan.chunks)
+    lines = [
+        "🔎 **Большой PR — ревью по частям.**",
+        "",
+        f"- Прогресс: **{done}/{total}** чанков готово"
+        + (f" (не удалось: {failed})" if failed else ""),
+        f"- Файлов к ревью: {weight.files}",
+    ]
+    if done >= total:
+        lines.append("- Готово — собираю итог…")
+    lines += ["", ACK_MARKER]
+    return "\n".join(lines)
+
+
+def publish_progress(client, repo: str, number: int, weight: DiffWeight,
+                     plan: ChunkPlan, *, done: int, failed: int = 0) -> str:
+    """Идемпотентно обновить прогресс на ack-комменте (единый писатель, M3/СТ-25)."""
+    body = build_progress_comment(weight, plan, done=done, failed=failed)
+    client.upsert_comment(repo, number, ACK_MARKER, body)
+    return body

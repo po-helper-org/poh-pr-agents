@@ -7,8 +7,21 @@ from reliability.sizing import (
     classify,
     diff_weight,
     estimate_tokens,
+    files_from_api,
     model_token_budget,
 )
+
+
+class TestFilesFromApi(unittest.TestCase):
+    def test_maps_fields(self):
+        raw = [{"filename": "a.py", "additions": 10, "deletions": 2, "status": "modified"}]
+        fs = files_from_api(raw)
+        self.assertEqual(fs[0].path, "a.py")
+        self.assertEqual((fs[0].additions, fs[0].deletions, fs[0].status), (10, 2, "modified"))
+
+    def test_defaults_when_missing(self):
+        fs = files_from_api([{"filename": "b.py"}])
+        self.assertEqual((fs[0].additions, fs[0].deletions, fs[0].status), (0, 0, "modified"))
 
 
 class TestEstimate(unittest.TestCase):

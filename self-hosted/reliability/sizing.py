@@ -39,6 +39,13 @@ class DiffWeight:
     est_tokens: int
 
 
+def files_from_api(raw: list) -> list:
+    """Маппинг ответа github_client.list_pull_files → список FileChange."""
+    return [FileChange(r.get("filename", ""), int(r.get("additions", 0)),
+                       int(r.get("deletions", 0)), r.get("status", "modified"))
+            for r in raw]
+
+
 def estimate_tokens(additions: int, deletions: int) -> int:
     """Оценка токенов одного файла по числу изменённых строк (+overhead хедера)."""
     return (max(0, additions) + max(0, deletions)) * TOKENS_PER_LINE + TOKENS_PER_FILE_OVERHEAD

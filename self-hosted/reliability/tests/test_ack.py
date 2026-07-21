@@ -5,8 +5,10 @@ from reliability.ack import (
     ACK_MARKER,
     SLA_LARGE_REVIEW_SEC,
     build_ack_comment,
+    build_progress_comment,
     estimate_eta_seconds,
     publish_ack,
+    publish_progress,
 )
 from reliability.chunking import plan_chunks
 from reliability.sizing import FileChange, diff_weight
@@ -57,6 +59,30 @@ class TestAckComment(unittest.TestCase):
         c = FakeClient()
         publish_ack(c, "o/r", 7, w, plan)
         self.assertEqual(len(c.calls), 1)
+        self.assertEqual(c.calls[0][:3], ("o/r", 7, ACK_MARKER))
+
+
+class TestProgress(unittest.TestCase):
+    def _plan(self, n=5):
+        files = [FileChange(f"f{i}.py", 50, 0) for i in range(n)]
+        return diff_weight(files), plan_chunks(files, chunk_budget_tokens=700)
+
+    def test_progress_shows_counts(self):
+        w, plan = self._plan(5)
+        body = build_progress_comment(w, plan, done=2, failed=1)
+        self.assertIn(f"2/{len(plan.chunks)}", body)
+        self.assertIn("не удалось: 1", body)
+        self.assertTrue(body.strip().endswith(ACK_MARKER))
+
+    def test_progress_done_collecting(self):
+        w, plan = self._plan(3)
+        body = build_progress_comment(w, plan, done=len(plan.chunks))
+        self.assertIn("собираю итог", body)
+
+    def test_publish_progress_upserts_ack_marker(self):
+        w, plan = self._plan(3)
+        c = FakeClient()
+        publish_progress(c, "o/r", 7, w, plan, done=1)
         self.assertEqual(c.calls[0][:3], ("o/r", 7, ACK_MARKER))
 
 
