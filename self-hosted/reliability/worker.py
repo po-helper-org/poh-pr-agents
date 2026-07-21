@@ -132,6 +132,34 @@ def run_forever(queue, *, store, client, analyze, idle_sleep=1.0, **kw):  # prag
             time.sleep(idle_sleep)
 
 
+def resolve_worker_timeouts(env) -> dict:
+    """Вложенность таймаутов (ФТ-APRP-11): `ai < attempt < task < visibility`.
+
+    pr-agent ретраит вызов модели ВНУТРЕННЕ (`MODEL_RETRIES`, захардкожено upstream —
+    конфиг-ключа нет), поэтому один вызов провайдера длится до ~`MODEL_RETRIES × ai`.
+    `attempt_timeout` gateway обязан это покрывать: иначе gateway бросает ещё живой
+    поток pr-agent по своему таймауту, а брошенный поток продолжает дожигать Z.AI
+    (наблюдалось `ai=90 → time taken=271.79s`). Дефолты подобраны с запасом на
+    внутренние ретраи; circuit breaker ограничивает повторные медленные сбои.
+
+    Инвертированные/тесные значения авто-исправляются (с предупреждением), чтобы прод
+    не поднялся с `task ≥ visibility` (иначе очередь передоставит ещё обрабатываемое
+    сообщение — двойная обработка, СТ-17)."""
+    attempt = float(env.get("RELIABILITY_ATTEMPT_TIMEOUT", "200"))
+    task = float(env.get("RELIABILITY_TASK_TIMEOUT", "210"))
+    visibility = float(env.get("RELIABILITY_VISIBILITY_TIMEOUT", "0") or 0)
+    if task <= attempt:
+        logger.warning("timeout nesting: task(%.0f) <= attempt(%.0f) → поднимаю task",
+                       task, attempt)
+        task = attempt + 10
+    if visibility <= task:
+        if visibility:
+            logger.warning("timeout nesting: visibility(%.0f) <= task(%.0f) → поднимаю visibility",
+                           visibility, task)
+        visibility = task + 60
+    return {"attempt": attempt, "task": task, "visibility": visibility}
+
+
 def main():  # pragma: no cover - deploy entrypoint (отдельный процесс воркера)
     import os
 
@@ -153,16 +181,18 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
     # RELIABILITY_LLM_RPS ≈ (лимит Z.AI) / (макс. число реплик воркера).
     rate = float(os.environ.get("RELIABILITY_LLM_RPS", "3"))
     burst = float(os.environ.get("RELIABILITY_LLM_BURST", "6"))
+    tmo = resolve_worker_timeouts(os.environ)  # ФТ-APRP-11: ai < attempt < task < visibility
     gateway = Gateway(
         [Provider("zai", analyze_adapter.run,
                   breaker=CircuitBreaker(
                       failure_threshold=int(os.environ.get("RELIABILITY_CB_THRESHOLD", "5")),
                       reset_timeout=float(os.environ.get("RELIABILITY_CB_RESET", "30"))))],
         limiter=TokenBucket(rate=rate, capacity=burst),
-        attempt_timeout=float(os.environ.get("RELIABILITY_ATTEMPT_TIMEOUT", "75")))
+        attempt_timeout=tmo["attempt"])
 
     run_forever(queue, store=store, client=client, analyze=gateway.run,
-                task_timeout=float(os.environ.get("RELIABILITY_TASK_TIMEOUT", "90")),
+                task_timeout=tmo["task"],
+                visibility_timeout=tmo["visibility"],
                 max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")),
                 backoff=float(os.environ.get("RELIABILITY_BACKOFF", "10")),          # ×attempts на сбое
                 backpressure_delay=float(os.environ.get("RELIABILITY_BACKPRESSURE_DELAY", "5")))

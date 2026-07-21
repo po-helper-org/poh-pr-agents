@@ -27,7 +27,7 @@ x-reliability-env: &reliability-env
   OPENAI_API_BASE: "${OPENAI_API_BASE:-}"
   CONFIG_MODEL: "${CONFIG_MODEL:-}"
   CONFIG_MAX_TOKENS: "${CONFIG_MAX_TOKENS:-}"
-  CONFIG_AI_TIMEOUT: "${CONFIG_AI_TIMEOUT:-90}"
+  CONFIG_AI_TIMEOUT: "${CONFIG_AI_TIMEOUT:-60}"   # ФТ-APRP-11: таймаут ОДНОГО вызова модели (самый внутренний). pr-agent ретраит его внутри ~MODEL_RETRIES раз (захардкожено upstream)
   GITHUB_APP_ID: "${GITHUB_APP_ID}"
   GITHUB_WEBHOOK_SECRET: "${GITHUB_WEBHOOK_SECRET}"
   GITHUB_PRIVATE_KEY_B64: "${GITHUB_PRIVATE_KEY_B64}"
@@ -81,8 +81,13 @@ services:
       RELIABILITY_LLM_BURST: "${RELIABILITY_LLM_BURST:-6}"            # ёмкость всплеска
       RELIABILITY_CB_THRESHOLD: "${RELIABILITY_CB_THRESHOLD:-5}"      # сбоев подряд → размыкание
       RELIABILITY_CB_RESET: "${RELIABILITY_CB_RESET:-30}"            # сек до пробного вызова
-      RELIABILITY_ATTEMPT_TIMEOUT: "${RELIABILITY_ATTEMPT_TIMEOUT:-75}"  # < task_timeout
-      RELIABILITY_TASK_TIMEOUT: "${RELIABILITY_TASK_TIMEOUT:-90}"
+      # ФТ-APRP-11: вложенность ai < attempt < task < visibility. attempt покрывает
+      # ВНУТРЕННИЕ ретраи pr-agent (~MODEL_RETRIES × CONFIG_AI_TIMEOUT), иначе gateway
+      # бросает ещё живой поток → Z.AI дожигается впустую (инцидент 90→271с). Circuit
+      # breaker ограничивает повторные медленные сбои. Инверсия авто-исправляется в коде.
+      RELIABILITY_ATTEMPT_TIMEOUT: "${RELIABILITY_ATTEMPT_TIMEOUT:-200}"     # ≥ ~3×CONFIG_AI_TIMEOUT (запас на внутр. ретраи pr-agent)
+      RELIABILITY_TASK_TIMEOUT: "${RELIABILITY_TASK_TIMEOUT:-210}"           # > attempt
+      RELIABILITY_VISIBILITY_TIMEOUT: "${RELIABILITY_VISIBILITY_TIMEOUT:-280}"  # > task (передоставка только после того, как воркер точно бросил, СТ-17)
       RELIABILITY_BACKOFF: "${RELIABILITY_BACKOFF:-10}"                 # сек ×attempts на сбое (не спиним)
       RELIABILITY_BACKPRESSURE_DELAY: "${RELIABILITY_BACKPRESSURE_DELAY:-5}"  # сек отсрочки при rate-limit
     command: ["python", "-m", "reliability.worker"]
