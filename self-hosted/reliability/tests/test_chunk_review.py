@@ -13,10 +13,11 @@ class TestPrompt(unittest.TestCase):
     def test_includes_paths_patches_instructions(self):
         system, user = build_review_prompt(
             [("a.py", "@@ -1 +1 @@\n-x\n+y")], extra_instructions="INSTR")
-        self.assertEqual(system, SYSTEM_PROMPT)
+        self.assertIn(SYSTEM_PROMPT, system)
+        self.assertIn("INSTR", system)          # инструкции — в system, не в user
+        self.assertNotIn("INSTR", user)
         self.assertIn("`a.py`", user)
         self.assertIn("+y", user)
-        self.assertIn("INSTR", user)
 
     def test_skips_empty_patches(self):
         _, user = build_review_prompt([("bin.png", ""), ("a.py", "patch")])

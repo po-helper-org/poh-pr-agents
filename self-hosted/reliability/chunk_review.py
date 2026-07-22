@@ -35,11 +35,16 @@ SYSTEM_PROMPT = (
 
 def build_review_prompt(files_with_patches: list, *,
                         extra_instructions: str = DEFAULT_REVIEW_INSTRUCTIONS) -> tuple:
-    """(system, user) для вызова модели. `files_with_patches` — [(path, patch)]."""
+    """(system, user) для вызова модели. `files_with_patches` — [(path, patch)].
+
+    Инструкции — в SYSTEM (не в user): в user только сам дифф, чтобы слова из
+    инструкций (напр. 'secret', 'leaks') не «протекали» в область ревьюируемого
+    кода и не порождали ложных находок."""
     blocks = [f"### `{path}`\n```diff\n{patch}\n```"
               for path, patch in files_with_patches if patch]
-    user = f"{extra_instructions}\n\nReview these changes:\n\n" + "\n\n".join(blocks)
-    return SYSTEM_PROMPT, user
+    system = f"{SYSTEM_PROMPT}\n\n{extra_instructions}"
+    user = "Review these changes:\n\n" + "\n\n".join(blocks)
+    return system, user
 
 
 def review_chunk(model_call, files_with_patches: list, *,
