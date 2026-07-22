@@ -5,7 +5,12 @@ from reliability import metrics
 from reliability.queue import DurableQueue
 from reliability.state import Backpressure, Event, State, StateStore, event_to_dict
 from reliability.supervisor import process
-from reliability.worker import TaskTimeout, handle_lease, run_once
+from reliability.worker import (
+    TaskTimeout,
+    handle_lease,
+    resolve_worker_timeouts,
+    run_once,
+)
 
 
 class FakeAnalyze:
@@ -177,6 +182,86 @@ class TestWorker(unittest.TestCase):
         self.assertTrue(run_once(self.queue, store=self.store, client=self.client,
                                  analyze=FakeAnalyze()))
         self.assertEqual(self.store.state_of("d1"), State.DONE)
+
+
+class TestResolveWorkerTimeouts(unittest.TestCase):
+    """ФТ-APRP-11: вложенность ai < attempt < task < visibility, авто-исправление инверсии."""
+
+    def test_defaults_nested(self):
+        # пустой env: attempt/task — дефолты функции; visibility не задан → task+60
+        # (явный прод-дефолт 280 задаётся в docker-compose, здесь проверяем fallback кода)
+        t = resolve_worker_timeouts({})
+        self.assertLess(t["attempt"], t["task"])
+        self.assertLess(t["task"], t["visibility"])
+        self.assertEqual((t["attempt"], t["task"], t["visibility"]), (200.0, 210.0, 270.0))
+
+    def test_env_overrides_respected(self):
+        t = resolve_worker_timeouts({
+            "RELIABILITY_ATTEMPT_TIMEOUT": "120",
+            "RELIABILITY_TASK_TIMEOUT": "130",
+            "RELIABILITY_VISIBILITY_TIMEOUT": "200",
+        })
+        self.assertEqual((t["attempt"], t["task"], t["visibility"]), (120.0, 130.0, 200.0))
+
+    def test_inverted_task_bumped_above_attempt(self):
+        # прежняя инверсия из прода: attempt(75) > task(90)? нет — task<=attempt: 90/75
+        t = resolve_worker_timeouts({
+            "RELIABILITY_ATTEMPT_TIMEOUT": "90",
+            "RELIABILITY_TASK_TIMEOUT": "75",       # <= attempt → авто-подъём
+            "RELIABILITY_VISIBILITY_TIMEOUT": "300",
+        })
+        self.assertGreater(t["task"], t["attempt"])
+        self.assertEqual(t["task"], 100.0)          # attempt+10
+
+    def test_visibility_unset_defaults_above_task(self):
+        t = resolve_worker_timeouts({
+            "RELIABILITY_ATTEMPT_TIMEOUT": "100",
+            "RELIABILITY_TASK_TIMEOUT": "110",       # visibility не задан
+        })
+        self.assertEqual(t["visibility"], 170.0)     # task+60
+        self.assertLess(t["task"], t["visibility"])
+
+    def test_visibility_below_task_bumped(self):
+        t = resolve_worker_timeouts({
+            "RELIABILITY_ATTEMPT_TIMEOUT": "100",
+            "RELIABILITY_TASK_TIMEOUT": "150",
+            "RELIABILITY_VISIBILITY_TIMEOUT": "120",  # <= task → авто-подъём
+        })
+        self.assertEqual(t["visibility"], 210.0)      # task+60
+        self.assertLess(t["task"], t["visibility"])
+
+
+class TestMapReduceDispatch(unittest.TestCase):
+    """Пункт B: chunk/reduce события уходят в mapreduce_handle, минуя state-machine."""
+
+    def test_chunk_event_dispatched(self):
+        store, queue = StateStore(":memory:"), DurableQueue(":memory:")
+        queue.enqueue({"event_type": "chunk", "job_key": "j", "repo": "o/r",
+                       "number": 7, "chunk_index": 0, "files": ["a.py"]}, "o/r#7")
+        lease = queue.lease(visibility_timeout=30)
+        seen = {}
+
+        def fake_mr(l, *, queue, store, client, max_attempts, backoff, backpressure_delay):
+            seen["type"] = l.payload["event_type"]
+            queue.ack(l.id, l.token)
+            return "ack"
+
+        out = handle_lease(lease, queue=queue, store=store, client=FakeClient(),
+                           analyze=FakeAnalyze(), mapreduce_handle=fake_mr)
+        self.assertEqual(out, "ack")
+        self.assertEqual(seen["type"], "chunk")    # ушло в диспетчер, не в process()
+
+    def test_normal_event_not_dispatched_to_mapreduce(self):
+        store, queue = StateStore(":memory:"), DurableQueue(":memory:")
+        e = Event("d1", "o/r", 7, "abc", "/review")
+        store.record_received(e)
+        queue.enqueue(event_to_dict(e), e.repo)
+        lease = queue.lease(visibility_timeout=30)
+        called = []
+        handle_lease(lease, queue=queue, store=store, client=FakeClient(), analyze=FakeAnalyze(),
+                     run_fn=passthrough, mapreduce_handle=lambda *a, **k: called.append(1))
+        self.assertEqual(called, [])                # обычное событие — обычный путь
+        self.assertEqual(store.state_of("d1"), State.DONE)
 
 
 if __name__ == "__main__":

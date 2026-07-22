@@ -12,10 +12,13 @@ import time
 from typing import Callable, Optional
 
 from reliability import metrics
+from reliability.mapreduce import CHUNK_EVENT, REDUCE_EVENT
 from reliability.notifier import GitHubClient, notify_failure
 from reliability.queue import DurableQueue, Lease
 from reliability.state import Backpressure, State, StateStore, event_from_dict
 from reliability.supervisor import process
+
+_MAPREDUCE_EVENTS = frozenset({CHUNK_EVENT, REDUCE_EVENT})
 
 logger = logging.getLogger(__name__)  # reliability.worker → stdout (см. logging_setup)
 
@@ -57,7 +60,14 @@ def _drive_to_dead_letter(store: StateStore, delivery_id: str) -> None:
 def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
                  client: GitHubClient, analyze, run_fn=run_with_timeout,
                  task_timeout: float = 90, max_attempts: int = 5, backoff: float = 0,
-                 backpressure_delay: float = 5.0) -> str:
+                 backpressure_delay: float = 5.0, mapreduce_handle=None) -> str:
+    # map-reduce события (chunk/reduce) — отдельный durable-путь, мимо state-machine
+    # обычных событий (их координация в job-сторе). Включается только при активном
+    # флаге (mapreduce_handle задан); иначе таких событий в очереди не бывает.
+    if mapreduce_handle is not None and lease.payload.get("event_type") in _MAPREDUCE_EVENTS:
+        return mapreduce_handle(lease, queue=queue, store=store, client=client,
+                                max_attempts=max_attempts, backoff=backoff,
+                                backpressure_delay=backpressure_delay)
     event = event_from_dict(lease.payload)
     force = event.event_type == "reconcile"
     reason: Optional[str] = None
@@ -108,7 +118,7 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
 def run_once(queue: DurableQueue, *, store: StateStore, client: GitHubClient, analyze,
              visibility_timeout: float = 120, task_timeout: float = 90,
              max_attempts: int = 5, backoff: float = 0,
-             backpressure_delay: float = 5.0) -> bool:
+             backpressure_delay: float = 5.0, mapreduce_handle=None) -> bool:
     """Обработать одно сообщение; False если очередь пуста.
 
     Инвариант: visibility_timeout > task_timeout. Воркер бросает задачу по
@@ -122,7 +132,7 @@ def run_once(queue: DurableQueue, *, store: StateStore, client: GitHubClient, an
         return False
     handle_lease(lease, queue=queue, store=store, client=client, analyze=analyze,
                  task_timeout=task_timeout, max_attempts=max_attempts, backoff=backoff,
-                 backpressure_delay=backpressure_delay)
+                 backpressure_delay=backpressure_delay, mapreduce_handle=mapreduce_handle)
     return True
 
 
@@ -130,6 +140,34 @@ def run_forever(queue, *, store, client, analyze, idle_sleep=1.0, **kw):  # prag
     while True:
         if not run_once(queue, store=store, client=client, analyze=analyze, **kw):
             time.sleep(idle_sleep)
+
+
+def resolve_worker_timeouts(env) -> dict:
+    """Вложенность таймаутов (ФТ-APRP-11): `ai < attempt < task < visibility`.
+
+    pr-agent ретраит вызов модели ВНУТРЕННЕ (`MODEL_RETRIES`, захардкожено upstream —
+    конфиг-ключа нет), поэтому один вызов провайдера длится до ~`MODEL_RETRIES × ai`.
+    `attempt_timeout` gateway обязан это покрывать: иначе gateway бросает ещё живой
+    поток pr-agent по своему таймауту, а брошенный поток продолжает дожигать Z.AI
+    (наблюдалось `ai=90 → time taken=271.79s`). Дефолты подобраны с запасом на
+    внутренние ретраи; circuit breaker ограничивает повторные медленные сбои.
+
+    Инвертированные/тесные значения авто-исправляются (с предупреждением), чтобы прод
+    не поднялся с `task ≥ visibility` (иначе очередь передоставит ещё обрабатываемое
+    сообщение — двойная обработка, СТ-17)."""
+    attempt = float(env.get("RELIABILITY_ATTEMPT_TIMEOUT", "200"))
+    task = float(env.get("RELIABILITY_TASK_TIMEOUT", "210"))
+    visibility = float(env.get("RELIABILITY_VISIBILITY_TIMEOUT", "0") or 0)
+    if task <= attempt:
+        logger.warning("timeout nesting: task(%.0f) <= attempt(%.0f) → поднимаю task",
+                       task, attempt)
+        task = attempt + 10
+    if visibility <= task:
+        if visibility:
+            logger.warning("timeout nesting: visibility(%.0f) <= task(%.0f) → поднимаю visibility",
+                           visibility, task)
+        visibility = task + 60
+    return {"attempt": attempt, "task": task, "visibility": visibility}
 
 
 def main():  # pragma: no cover - deploy entrypoint (отдельный процесс воркера)
@@ -153,19 +191,47 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
     # RELIABILITY_LLM_RPS ≈ (лимит Z.AI) / (макс. число реплик воркера).
     rate = float(os.environ.get("RELIABILITY_LLM_RPS", "3"))
     burst = float(os.environ.get("RELIABILITY_LLM_BURST", "6"))
+    tmo = resolve_worker_timeouts(os.environ)  # ФТ-APRP-11: ai < attempt < task < visibility
     gateway = Gateway(
         [Provider("zai", analyze_adapter.run,
                   breaker=CircuitBreaker(
                       failure_threshold=int(os.environ.get("RELIABILITY_CB_THRESHOLD", "5")),
                       reset_timeout=float(os.environ.get("RELIABILITY_CB_RESET", "30"))))],
         limiter=TokenBucket(rate=rate, capacity=burst),
-        attempt_timeout=float(os.environ.get("RELIABILITY_ATTEMPT_TIMEOUT", "75")))
+        attempt_timeout=tmo["attempt"])
 
-    run_forever(queue, store=store, client=client, analyze=gateway.run,
-                task_timeout=float(os.environ.get("RELIABILITY_TASK_TIMEOUT", "90")),
+    # ── map-reduce (ФТ-APRP-2/6/8, пункт B) — только при флаге RELIABILITY_MAPREDUCE ──
+    # OFF по умолчанию: прод-путь одиночного прохода не меняется, мерж в main безопасен.
+    analyze = gateway.run
+    mapreduce_handle = None
+    if os.environ.get("RELIABILITY_MAPREDUCE", "").strip().lower() in ("1", "true", "yes", "on"):
+        from reliability import chunk_review, mapreduce_worker
+        deep_review = lambda fwp: chunk_review.review_chunk(chunk_review.glm_model_call, fwp)
+
+        def mapreduce_handle(lease, **kw):  # noqa: E731 - тонкая привязка review
+            return mapreduce_worker.handle(lease, review=deep_review, **kw)
+
+        chunk_budget = int(os.environ.get("RELIABILITY_CHUNK_BUDGET_TOKENS", "12000"))
+        total_budget = int(os.environ.get("RELIABILITY_TOTAL_BUDGET_TOKENS", "0"))
+        _base_analyze = gateway.run
+
+        def analyze(event):  # маршрутизация большого /review в fan-out
+            if event.event_type == "pull_request" and event.command == "/review" \
+                    and mapreduce_worker.route_and_fanout(
+                        event, client=client, store=store, queue=queue,
+                        list_files=client.list_pull_files,
+                        chunk_budget_tokens=chunk_budget, total_budget_tokens=total_budget):
+                return
+            return _base_analyze(event)
+        logger.info("map-reduce ВКЛЮЧЁН (RELIABILITY_MAPREDUCE): большой /review идёт по частям")
+
+    run_forever(queue, store=store, client=client, analyze=analyze,
+                task_timeout=tmo["task"],
+                visibility_timeout=tmo["visibility"],
                 max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")),
                 backoff=float(os.environ.get("RELIABILITY_BACKOFF", "10")),          # ×attempts на сбое
-                backpressure_delay=float(os.environ.get("RELIABILITY_BACKPRESSURE_DELAY", "5")))
+                backpressure_delay=float(os.environ.get("RELIABILITY_BACKPRESSURE_DELAY", "5")),
+                mapreduce_handle=mapreduce_handle)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -167,3 +167,45 @@ class Gateway:
             return
         metrics.incr("gateway_unavailable")
         raise GatewayUnavailable(f"all providers unavailable: {errors}")
+
+
+class TieredGateway:
+    """Тиринг моделей (ФТ-APRP-10 / СТ-24): маршрутизация вызова к УРОВНЮ модели.
+
+    `cheap` (GLM-4.7) — лёгкие операции (триаж/склейка reduce); `deep` (GLM-5) —
+    глубокое ревью чанков. Каждый уровень — самостоятельный `Gateway` (свой breaker/
+    limiter/timeout), уровни задаются data-driven (M5), не хардкодом. Неизвестный
+    уровень → `deep` (безопасный дефолт: лучше дорого-и-точно, чем потерять вызов)."""
+
+    def __init__(self, tiers: dict):
+        if "deep" not in tiers:
+            raise ValueError("tiered gateway requires a 'deep' tier")
+        self._tiers = tiers
+
+    def run(self, event: Event, tier: str = "deep") -> None:
+        gw = self._tiers.get(tier) or self._tiers["deep"]
+        if tier not in self._tiers:
+            metrics.incr("gateway_tier_fallback_deep")
+        return gw.run(event)
+
+    def tiers(self) -> list:
+        return list(self._tiers)
+
+
+def build_tiered_gateway(specs: list, *, run_fn: Callable = _default_run_fn) -> TieredGateway:
+    """Собрать TieredGateway из data-driven спецификаций уровней (M5).
+
+    spec: {tier, name, invoke, attempt_timeout, rate?, burst?, cb_threshold?, cb_reset?}.
+    Пример: [{tier:'deep', name:'glm-5', invoke:..., attempt_timeout:200},
+             {tier:'cheap', name:'glm-4.7', invoke:..., attempt_timeout:40}]."""
+    tiers: dict = {}
+    for s in specs:
+        breaker = CircuitBreaker(failure_threshold=s.get("cb_threshold", 5),
+                                 reset_timeout=s.get("cb_reset", 30.0))
+        limiter = (TokenBucket(rate=s["rate"], capacity=s.get("burst", s["rate"]))
+                   if s.get("rate") else None)
+        tiers[s["tier"]] = Gateway([Provider(s["name"], s["invoke"], breaker=breaker)],
+                                   limiter=limiter,
+                                   attempt_timeout=s.get("attempt_timeout", 75.0),
+                                   run_fn=run_fn)
+    return TieredGateway(tiers)
