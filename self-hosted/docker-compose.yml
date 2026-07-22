@@ -90,6 +90,14 @@ services:
       RELIABILITY_VISIBILITY_TIMEOUT: "${RELIABILITY_VISIBILITY_TIMEOUT:-280}"  # > task (передоставка только после того, как воркер точно бросил, СТ-17)
       RELIABILITY_BACKOFF: "${RELIABILITY_BACKOFF:-10}"                 # сек ×attempts на сбое (не спиним)
       RELIABILITY_BACKPRESSURE_DELAY: "${RELIABILITY_BACKPRESSURE_DELAY:-5}"  # сек отсрочки при rate-limit
+      # ── Адаптивная обработка больших PR (APRP, пункт B) — ВЫКЛ по умолчанию ──
+      # Пусто/0 = прод-путь одиночного прохода (без изменений). 1/true = большой
+      # `/review` идёт map-reduce'ом (fast-ack + чанки + reduce). Включать осознанно
+      # после проверки на стейджинге (смоук большого PR + eval качества --live).
+      RELIABILITY_MAPREDUCE: "${RELIABILITY_MAPREDUCE:-}"
+      RELIABILITY_CHUNK_BUDGET_TOKENS: "${RELIABILITY_CHUNK_BUDGET_TOKENS:-12000}"  # порог small/large и размер чанка (калибровать на модель, Q2)
+      RELIABILITY_TOTAL_BUDGET_TOKENS: "${RELIABILITY_TOTAL_BUDGET_TOKENS:-0}"       # 0 = без общего лимита бюджета
+      DEEP_MODEL: "${DEEP_MODEL:-}"                                                  # модель ревью чанка (GLM-5); пусто → CONFIG_MODEL
     command: ["python", "-m", "reliability.worker"]
     volumes:
       - reliability-data:/data

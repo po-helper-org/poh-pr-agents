@@ -231,5 +231,38 @@ class TestResolveWorkerTimeouts(unittest.TestCase):
         self.assertLess(t["task"], t["visibility"])
 
 
+class TestMapReduceDispatch(unittest.TestCase):
+    """Пункт B: chunk/reduce события уходят в mapreduce_handle, минуя state-machine."""
+
+    def test_chunk_event_dispatched(self):
+        store, queue = StateStore(":memory:"), DurableQueue(":memory:")
+        queue.enqueue({"event_type": "chunk", "job_key": "j", "repo": "o/r",
+                       "number": 7, "chunk_index": 0, "files": ["a.py"]}, "o/r#7")
+        lease = queue.lease(visibility_timeout=30)
+        seen = {}
+
+        def fake_mr(l, *, queue, store, client, max_attempts, backoff, backpressure_delay):
+            seen["type"] = l.payload["event_type"]
+            queue.ack(l.id, l.token)
+            return "ack"
+
+        out = handle_lease(lease, queue=queue, store=store, client=FakeClient(),
+                           analyze=FakeAnalyze(), mapreduce_handle=fake_mr)
+        self.assertEqual(out, "ack")
+        self.assertEqual(seen["type"], "chunk")    # ушло в диспетчер, не в process()
+
+    def test_normal_event_not_dispatched_to_mapreduce(self):
+        store, queue = StateStore(":memory:"), DurableQueue(":memory:")
+        e = Event("d1", "o/r", 7, "abc", "/review")
+        store.record_received(e)
+        queue.enqueue(event_to_dict(e), e.repo)
+        lease = queue.lease(visibility_timeout=30)
+        called = []
+        handle_lease(lease, queue=queue, store=store, client=FakeClient(), analyze=FakeAnalyze(),
+                     run_fn=passthrough, mapreduce_handle=lambda *a, **k: called.append(1))
+        self.assertEqual(called, [])                # обычное событие — обычный путь
+        self.assertEqual(store.state_of("d1"), State.DONE)
+
+
 if __name__ == "__main__":
     unittest.main()

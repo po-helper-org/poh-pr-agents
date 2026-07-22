@@ -85,3 +85,24 @@ def publish_progress(client, repo: str, number: int, weight: DiffWeight,
     body = build_progress_comment(weight, plan, done=done, failed=failed)
     client.upsert_comment(repo, number, ACK_MARKER, body)
     return body
+
+
+def build_progress_counts(done: int, total: int, failed: int = 0) -> str:
+    """Прогресс только по счётчикам job (для воркера — без DiffWeight/ChunkPlan)."""
+    lines = [
+        "🔎 **Большой PR — ревью по частям.**",
+        "",
+        f"- Прогресс: **{done}/{total}** чанков готово"
+        + (f" (не удалось: {failed})" if failed else ""),
+    ]
+    if done >= total:
+        lines.append("- Готово — собираю итог…")
+    lines += ["", ACK_MARKER]
+    return "\n".join(lines)
+
+
+def publish_progress_counts(client, repo: str, number: int, *, done: int, total: int,
+                            failed: int = 0) -> str:
+    body = build_progress_counts(done, total, failed)
+    client.upsert_comment(repo, number, ACK_MARKER, body)
+    return body
