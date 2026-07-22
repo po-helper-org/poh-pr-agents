@@ -2,6 +2,7 @@
 import unittest
 
 from reliability import metrics
+from reliability.gateway import GatewayCircuitOpen
 from reliability.queue import DurableQueue
 from reliability.state import Backpressure, Event, State, StateStore, event_to_dict
 from reliability.supervisor import process
@@ -158,6 +159,22 @@ class TestWorker(unittest.TestCase):
         self.assertEqual(metrics.get("dead_letter_total"), 0)
         self.assertEqual(len(self.queue.dead_letters()), 0)
         self.assertEqual(metrics.get("backpressure_deferred"), 1)
+        self.assertEqual(self.queue.depth(), 1)            # осталось в очереди (отложено)
+
+    def test_gateway_circuit_open_deferred_not_dead_lettered(self):
+        # Регрессия каскада: org-wide бэклог + аутейдж Z.AI размыкает circuit →
+        # GatewayCircuitOpen. Событие должно ОТЛОЖИТЬСЯ (как backpressure), а не
+        # выжечь max_attempts и залить весь бэклог провал-комментами. «Не молчать»
+        # на затяжной простой — забота эскалации свипера, не воркера.
+        self._enqueue()
+        circuit_open = FakeAnalyze(exc=GatewayCircuitOpen("all circuits open"))
+        out = self._handle(circuit_open, max_attempts=1)   # порог=1 — поймали бы ложный DLQ
+        self.assertEqual(out, "deferred")
+        self.assertEqual(self.client.calls, [])            # НЕТ провал-коммента
+        self.assertEqual(metrics.get("dead_letter_total"), 0)
+        self.assertEqual(len(self.queue.dead_letters()), 0)
+        self.assertEqual(metrics.get("backpressure_deferred"), 1)
+        self.assertNotEqual(self.store.state_of("d1"), State.FAILED)  # не сбой попытки
         self.assertEqual(self.queue.depth(), 1)            # осталось в очереди (отложено)
 
     def test_dead_letter_comment_carries_real_failure_class(self):

@@ -2,9 +2,12 @@
 
 Стоит между воркером и pr-agent (который ходит в Z.AI). Даёт:
 - **circuit breaker на провайдера** (СТ-22): после N подряд сбоев/таймаутов цепь
-  размыкается → последующие вызовы отказывают МГНОВЕННО, не вися по таймауту.
-  Это и К-1 (быстрый видимый коммент вместо тишины), и К-3 (не жжём worker-секунды
-  на заведомо мёртвый Z.AI — предпосылка 100k/сутки), и щадящий режим для аутейджа.
+  размыкается → последующие вызовы отказывают МГНОВЕННО (GatewayCircuitOpen), не
+  вися по таймауту. Это backpressure: воркер ОТКЛАДЫВАЕТ PR до восстановления
+  провайдера, а не дедлетерит его провал-комментом (системный простой ≠ дефект PR;
+  иначе один аутейдж Z.AI спамит провалами весь org-wide бэклог). К-3 (не жжём
+  worker-секунды на мёртвый Z.AI) сохраняется; «не молчать» на затяжной простой —
+  эскалация свипера после max_cycles.
 - **token-bucket rate limit** (СТ-20): держим поток запросов под лимитом провайдера;
   переполнение → backpressure (`RateLimited`), очередь разложит во времени.
 - **failover по пулу провайдеров** (СТ-19/21): пробуем следующий на сбое. Один ключ
@@ -35,7 +38,16 @@ Invoke = Callable[[Event], None]  # реальный вызов провайде
 
 
 class GatewayUnavailable(Exception):
-    """Все провайдеры пула недоступны (цепи разомкнуты или все попытки сбойны)."""
+    """Провайдеров РЕАЛЬНО звали (≥1 попытка за этот вызов), но все сбоили. Воркер
+    → nack (ретрай/DLQ+коммент): это «не молчать» для настоящего сбоя попытки."""
+
+
+class GatewayCircuitOpen(Backpressure):
+    """Все цепи провайдеров разомкнуты — звонков в этот раз НЕ было (системный
+    простой, уже подтверждённый circuit breaker'ом). Backpressure: воркер ОТЛОЖИТ
+    без счёта к DLQ и без провал-коммента — PR ни при чём. Держим до восстановления
+    провайдера; затяжной простой закрывает эскалация свипера (max_cycles), а не спам
+    провалов на весь бэклог при первом же аутейдже Z.AI."""
 
 
 class RateLimited(Backpressure):
@@ -141,9 +153,15 @@ class Gateway:
 
     def run(self, event: Event) -> None:
         """analyze-совместимый вход: провести анализ через защищённый пул.
-        Успех — молча (как analyze). Иначе RateLimited / GatewayUnavailable →
-        воркер преобразует в nack (ретрай/DLQ+коммент), тишины не будет (К-1)."""
+        Успех — молча (как analyze). RateLimited — backpressure (воркер отложит).
+        Если провайдера РЕАЛЬНО звали и он сбоил → GatewayUnavailable (воркер → nack:
+        ретрай/DLQ+коммент, «не молчать» для сбоя попытки). Если же все цепи разомкнуты
+        (системный простой, звонков не было) → GatewayCircuitOpen (тоже backpressure):
+        держим PR отложенным до восстановления провайдера, а не дедлетерим ложным
+        провал-комментом (иначе один аутейдж Z.AI спамит провалами весь org-wide
+        бэклог). «Не молчать» на затяжной простой — эскалация свипера после max_cycles."""
         errors: list[tuple[str, str]] = []
+        attempted = False  # был ли РЕАЛЬНЫЙ вызов провайдера (иначе всё — открытые цепи)
         for p in self._providers:
             if not p.breaker.allow():
                 metrics.incr("gateway_circuit_open")
@@ -153,6 +171,7 @@ class Gateway:
             if self._limiter is not None and not self._limiter.try_acquire():
                 metrics.incr("gateway_rate_limited")
                 raise RateLimited("local rate limit exceeded")
+            attempted = True
             try:
                 self._run_fn(lambda: p.invoke(event), self._attempt_timeout)
             except Exception as e:  # таймаут или сбой провайдера — это сбой цепи
@@ -165,6 +184,16 @@ class Gateway:
             if errors:  # дошли не с первого провайдера
                 metrics.incr("gateway_failover")
             return
+        if not attempted:
+            # ни одного вызова: все цепи разомкнуты. Breaker уже подтвердил системный
+            # простой провайдера — это НЕ дефект PR. Backpressure → воркер отложит без
+            # счёта к DLQ и без провал-коммента; иначе org-wide бэклог самоуничтожается
+            # в дедлетеры при первом же аутейдже Z.AI. Восстановится провайдер — добьём.
+            metrics.incr("gateway_circuit_deferred")
+            raise GatewayCircuitOpen(f"all circuits open: {errors}")
         metrics.incr("gateway_unavailable")
+        # Реальный сбой попытки (провайдеров звали, все сбоили) — эскалация в Sentry.
+        # Системный простой (GatewayCircuitOpen, звонков не было) сюда НЕ доходит и в
+        # Sentry не идёт: аутейдж Z.AI не должен спамить issue на каждый PR бэклога.
         sentry_setup.capture_gateway_unavailable(event, errors)
-        raise GatewayUnavailable(f"all providers unavailable: {errors}")
+        raise GatewayUnavailable(f"all providers failed: {errors}")
