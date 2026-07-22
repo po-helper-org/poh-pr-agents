@@ -154,7 +154,8 @@ stateDiagram-v2
 | Ничего не обрабатывается, `backpressure_deferred` растёт | rate limit занижен (`RPS`/`BURST` слишком малы) | `metrics`: `backpressure_deferred` ↑, `gateway_success` стоит | Поднять `RELIABILITY_LLM_RPS` и `RELIABILITY_LLM_BURST` |
 | Пусто, `gateway_circuit_open` растёт | circuit breaker разомкнут — Z.AI ещё лежит | `metrics`: `gateway_circuit_open` ↑ | Дождаться/починить Z.AI — breaker сам закроется после успешной пробы (`RELIABILITY_CB_RESET`) |
 | Дублирующееся ревью/коммент | несколько узлов на РАЗНЫХ томах (claim/queue не общие) | два инстанса пишут в разные `/data` | Держать один узел/том; для мультиузла — общий Redis/очередь (см. §6) |
-| Sweeper не дозапускает пропущенное | `RELIABILITY_REPOS` пуст или sweeper упал | logs sweeper; env | Задать `RELIABILITY_REPOS="owner/repo,..."`; перезапустить sweeper |
+| Sweeper падает/рестартует (`installation lookup failed` / `HTTP Error 401` на `/repos/.../installation`) | в `RELIABILITY_REPOS` указан точный `owner/repo`, которого нет или App к нему не имеет доступа | logs sweeper (traceback) | Исправить/убрать репо; для всей орг проще маска `owner/*` (`po-helper-org/*,ai-oxudevelopment/*`) — несуществующий owner маску не роняет |
+| Sweeper не дозапускает пропущенное по орг (но не падает) | App не установлен на owner маски → маска раскрывается в пусто | logs sweeper; GitHub App → Installations | Установить App на owner (Install → All repositories); перезапустить sweeper |
 | Событие «застряло» вне терминала | воркер умер в PROCESSING; захват завис | SQLite-запрос ниже | Ничего не делать — sweeper (`RELIABILITY_STALE_DEADLINE`) передоставит; захват самозалечивается на терминале |
 
 **Быстрые SQLite-запросы (внутри контейнера, `/data`):**

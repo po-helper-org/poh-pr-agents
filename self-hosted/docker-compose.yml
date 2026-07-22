@@ -9,7 +9,7 @@
 #
 # Env в Dokploy → Environment (single-line; см. SETUP.md). Обязательные:
 #   OPENAI_KEY  GITHUB_APP_ID  GITHUB_WEBHOOK_SECRET  GITHUB_PRIVATE_KEY_B64
-#   RELIABILITY_REPOS="owner/repo,owner/repo2"   (для sweeper; иначе он бездействует)
+#   RELIABILITY_REPOS="owner/repo,..." | "owner/*" | ""  (охват sweeper; см. ниже)
 # Остальное — с дефолтами (LLM endpoint, модель, лимиты, gateway/sweeper-настройки).
 #
 # Три процесса делят один volume с SQLite (state + queue):
@@ -96,7 +96,7 @@ services:
       - ingress
     environment:
       <<: *reliability-env
-      RELIABILITY_REPOS: "${RELIABILITY_REPOS}"                      # "owner/repo,..." — конкретные репо; ПУСТО → org-wide (все установки App)
+      RELIABILITY_REPOS: "${RELIABILITY_REPOS}"                      # точные "owner/repo,..."; маска "owner/*" (все репо орг, вкл. новые) или "*"; ПУСТО → org-wide (все установки App)
       RELIABILITY_COMMANDS: "${RELIABILITY_COMMANDS:-/describe,/review}"
       RELIABILITY_SWEEP_INTERVAL: "${RELIABILITY_SWEEP_INTERVAL:-300}"
       RELIABILITY_STALE_DEADLINE: "${RELIABILITY_STALE_DEADLINE:-1800}"

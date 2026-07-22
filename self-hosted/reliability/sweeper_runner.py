@@ -22,6 +22,8 @@ def main():  # pragma: no cover - deploy entrypoint
         make_has_completed_review,
         make_list_open_prs,
         make_list_open_prs_all,
+        make_list_open_prs_masked,
+        parse_repo_specs,
     )
 
     store = StateStore(os.environ.get("RELIABILITY_DB", "/data/reliability.db"))
@@ -45,11 +47,21 @@ def main():  # pragma: no cover - deploy entrypoint
 
     import logging
     log = logging.getLogger("reliability.sweeper")
-    # RELIABILITY_REPOS задан → сверяем ровно эти репо; пуст → org-wide: App сам
-    # определяет охват через свои установки (все репо всех орг/аккаунтов, где он
-    # установлен, включая новые). Живые PR-события и так идут по webhook для любого
-    # установленного репо — это лишь бэкстоп на пропущенные webhook'и.
-    if repos:
+    # Охват свипера по RELIABILITY_REPOS:
+    #   пусто            → org-wide: App сам определяет охват через все свои установки;
+    #   `owner/*` / `*`  → маска: все репо установки на этот owner (раскрывается каждый
+    #                      проход → новые репо орг подхватываются сами), можно мешать с
+    #                      точными и несколькими орг сразу (`po-helper-org/*,ai-oxu.../*`);
+    #   `owner/repo,...` → сверяем ровно эти репо.
+    # Живые PR-события и так идут по webhook для любого установленного репо — это лишь
+    # бэкстоп на пропущенные webhook'и.
+    concrete, mask_owners = parse_repo_specs(repos)
+    if mask_owners:
+        list_open_prs = make_list_open_prs_masked(client, analyze_adapter.provider(), repos)
+        masks = ["*" if o == "*" else f"{o}/*" for o in mask_owners]
+        log.info("sweeper started: masks=%s repos=%s commands=%s interval=%ss",
+                 masks, concrete, commands, interval)
+    elif repos:
         list_open_prs = make_list_open_prs(client, repos)
         log.info("sweeper started: repos=%s commands=%s interval=%ss", repos, commands, interval)
     else:
