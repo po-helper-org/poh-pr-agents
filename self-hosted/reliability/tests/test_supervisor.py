@@ -48,6 +48,19 @@ class TestProcess(unittest.TestCase):
             process(e, a, self.store)
         self.assertNotEqual(self.store.state_of(e.delivery_id), State.FAILED)
 
+    def test_gateway_circuit_open_reraised_not_marked_failed(self):
+        # системный простой провайдера (все цепи разомкнуты) — не сбой попытки:
+        # process пробрасывает наверх как backpressure, НЕ метит FAILED, держит захват
+        # → воркер отложит, а не дедлетерит PR провал-комментом.
+        from reliability.gateway import GatewayCircuitOpen
+        e = ev()
+        self.store.record_received(e)
+        a = FakeAnalyze(exc=GatewayCircuitOpen("all circuits open"))
+        with self.assertRaises(Backpressure):
+            process(e, a, self.store)
+        self.assertNotEqual(self.store.state_of(e.delivery_id), State.FAILED)
+        self.assertEqual(self.store.claim_holder(e.business_key), e.delivery_id)  # захват держим
+
     def test_base_exception_propagates(self):
         e = ev()
         self.store.record_received(e)

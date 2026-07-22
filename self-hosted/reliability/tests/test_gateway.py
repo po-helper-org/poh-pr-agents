@@ -6,6 +6,7 @@ from reliability.gateway import (
     Circuit,
     CircuitBreaker,
     Gateway,
+    GatewayCircuitOpen,
     GatewayUnavailable,
     Provider,
     RateLimited,
@@ -136,14 +137,30 @@ class TestGateway(unittest.TestCase):
         cb = CircuitBreaker(failure_threshold=2, reset_timeout=999, clock=_Clock())
         g = Gateway([Provider("z", spy, breaker=cb)], run_fn=passthrough)
         for _ in range(2):
-            with self.assertRaises(GatewayUnavailable):
+            with self.assertRaises(GatewayUnavailable):   # звали и сбоило → сбой попытки
                 g.run(ev())
         calls_before = spy.calls
-        # цепь разомкнута → следующий вызов отказывает МГНОВЕННО, провайдера не трогаем
-        with self.assertRaises(GatewayUnavailable):
+        # цепь разомкнута → следующий вызов отказывает МГНОВЕННО, провайдера не трогаем.
+        # Это backpressure (defer до восстановления), а НЕ сбой попытки: PR ни при чём,
+        # в DLQ/провал-коммент не уходит.
+        with self.assertRaises(GatewayCircuitOpen):
             g.run(ev())
         self.assertEqual(spy.calls, calls_before)     # быстрый отказ, без вызова
         self.assertEqual(metrics.get("gateway_circuit_open"), 1)
+        self.assertEqual(metrics.get("gateway_circuit_deferred"), 1)
+
+    def test_open_circuit_is_backpressure_not_unavailable(self):
+        # предразомкнутая цепь: звонков нет → GatewayCircuitOpen (backpressure),
+        # НЕ GatewayUnavailable. Так один аутейдж не дедлетерит весь org-wide бэклог.
+        spy = Spy()
+        cb_open = CircuitBreaker(failure_threshold=1, reset_timeout=999, clock=_Clock())
+        cb_open.record_failure()                          # разомкнута заранее
+        g = Gateway([Provider("z", spy, breaker=cb_open)], run_fn=passthrough)
+        with self.assertRaises(GatewayCircuitOpen):
+            g.run(ev())
+        self.assertEqual(spy.calls, 0)                    # провайдера не звали
+        self.assertFalse(issubclass(GatewayCircuitOpen, GatewayUnavailable))
+        self.assertTrue(issubclass(GatewayCircuitOpen, Backpressure))  # воркер отложит
 
     def test_timeout_counts_as_failure(self):
         spy = Spy()

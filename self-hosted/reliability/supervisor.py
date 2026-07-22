@@ -65,9 +65,10 @@ def process(event: Event, analyze: Analyze, store: StateStore, *, force: bool = 
     try:
         analyze(event)
     except Backpressure:
-        # НЕ сбой: локальный rate limit. Не метим FAILED, не публикуем провал —
-        # отдаём наверх, воркер отложит без счёта к DLQ. Захват держим (re-entrant
-        # при передоставке того же delivery_id).
+        # НЕ сбой попытки: локальный rate limit ИЛИ системный простой провайдера
+        # (все цепи разомкнуты — GatewayCircuitOpen). Не метим FAILED, не публикуем
+        # провал — отдаём наверх, воркер отложит без счёта к DLQ. Захват держим
+        # (re-entrant при передоставке того же delivery_id).
         raise
     except Exception as exc:  # доменный сбой одной попытки; BaseException (отмена) — наверх
         store.transition(event.delivery_id, State.FAILED)
