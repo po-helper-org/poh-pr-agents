@@ -28,7 +28,7 @@ import enum
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from reliability import metrics
+from reliability import metrics, sentry_setup
 from reliability.state import Backpressure, Event
 
 Invoke = Callable[[Event], None]  # реальный вызов провайдера; бросает при сбое
@@ -166,4 +166,5 @@ class Gateway:
                 metrics.incr("gateway_failover")
             return
         metrics.incr("gateway_unavailable")
+        sentry_setup.capture_gateway_unavailable(event, errors)
         raise GatewayUnavailable(f"all providers unavailable: {errors}")

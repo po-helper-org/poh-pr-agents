@@ -99,6 +99,17 @@ HTTP only** (its HTTPS is a self-signed `TRAEFIK DEFAULT CERT`). So:
 | `OPENAI_API_BASE` | | `https://api.z.ai/api/coding/paas/v4` |
 | `CONFIG_MODEL` | | `openai/glm-5` |
 | `CONFIG_MAX_TOKENS` | | `128000` |
+| `SENTRY_DSN` | | — (пусто → Sentry выключен) |
+| `SENTRY_ENVIRONMENT` | | `production` |
+
+### Sentry (наблюдаемость)
+
+Пусто/не задан `SENTRY_DSN` → Sentry выключен, стек ведёт себя как раньше (это и
+процедура отката: убрать переменную + рестарт). Задан → dead-letter и недоступность
+LLM-пула становятся адресуемым событием с тегами `service/repo/pr/command`, а не
+строкой в логах контейнера. DSN берётся из проекта sentry.io (Python-платформа).
+Требует пересборки образа (`docker compose up -d --build`) — `sentry-sdk` ставится
+слоем в `Dockerfile.reliability`, обычный рестарт его не подтянет.
 
 ## Troubleshooting
 

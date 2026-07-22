@@ -11,8 +11,9 @@ def main():  # pragma: no cover - deploy entrypoint
     import os
     import time
 
-    from reliability import analyze_adapter, logging_setup
+    from reliability import analyze_adapter, logging_setup, sentry_setup
     logging_setup.configure()  # reliability.* → stdout (логи свипера в контейнере sweeper)
+    sentry_setup.configure("sweeper")  # no-op без SENTRY_DSN
     from reliability.github_client import GitHubAppClient
     from reliability.queue import DurableQueue
     from reliability.state import StateStore, event_to_dict

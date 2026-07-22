@@ -9,6 +9,9 @@
 # ⚠️ Проверяется на живом смоуке (сборку/запуск контейнера здесь не выполнить).
 FROM pr-agent-github-app:local
 
+# Отдельным слоем ДО COPY: правка кода reliability не пересобирает установку пакета.
+RUN pip install --no-cache-dir "sentry-sdk[fastapi]>=2,<3"
+
 COPY reliability /app/reliability
 COPY reliability-entrypoint.sh /usr/local/bin/reliability-entrypoint.sh
 RUN chmod +x /usr/local/bin/reliability-entrypoint.sh
