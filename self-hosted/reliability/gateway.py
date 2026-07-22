@@ -31,7 +31,7 @@ import enum
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from reliability import metrics
+from reliability import metrics, sentry_setup
 from reliability.state import Backpressure, Event
 
 Invoke = Callable[[Event], None]  # реальный вызов провайдера; бросает при сбое
@@ -192,4 +192,8 @@ class Gateway:
             metrics.incr("gateway_circuit_deferred")
             raise GatewayCircuitOpen(f"all circuits open: {errors}")
         metrics.incr("gateway_unavailable")
+        # Реальный сбой попытки (провайдеров звали, все сбоили) — эскалация в Sentry.
+        # Системный простой (GatewayCircuitOpen, звонков не было) сюда НЕ доходит и в
+        # Sentry не идёт: аутейдж Z.AI не должен спамить issue на каждый PR бэклога.
+        sentry_setup.capture_gateway_unavailable(event, errors)
         raise GatewayUnavailable(f"all providers failed: {errors}")

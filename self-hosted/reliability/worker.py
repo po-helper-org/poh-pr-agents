@@ -11,7 +11,7 @@ import logging
 import time
 from typing import Callable, Optional
 
-from reliability import metrics
+from reliability import metrics, sentry_setup
 from reliability.notifier import GitHubClient, notify_failure
 from reliability.queue import DurableQueue, Lease
 from reliability.state import Backpressure, State, StateStore, event_from_dict
@@ -96,6 +96,7 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
         # но снимаем сразу, не заставляя сиблинга ждать своей следующей попытки.
         store.release_claim(event.business_key, event.delivery_id)
         metrics.incr("dead_letter_total")
+        sentry_setup.capture_dead_letter(event, reason or "unknown", lease.attempts)
         notify_failure(client, event, reason, lease.attempts, escalated=True)  # точный класс сбоя
         logger.warning("processed: delivery=%s command=%s → DEAD-LETTER (reason=%s attempts=%d) "
                        "— видимый коммент в PR", event.delivery_id, event.command, reason, lease.attempts)
@@ -135,8 +136,9 @@ def run_forever(queue, *, store, client, analyze, idle_sleep=1.0, **kw):  # prag
 def main():  # pragma: no cover - deploy entrypoint (отдельный процесс воркера)
     import os
 
-    from reliability import analyze_adapter, logging_setup
+    from reliability import analyze_adapter, logging_setup, sentry_setup
     logging_setup.configure()  # reliability.* → stdout (логи обработки в контейнере worker)
+    sentry_setup.configure("worker")  # no-op без SENTRY_DSN
     from reliability.gateway import CircuitBreaker, Gateway, Provider, TokenBucket
     from reliability.github_client import GitHubAppClient
 

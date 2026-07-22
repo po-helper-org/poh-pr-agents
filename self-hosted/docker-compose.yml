@@ -34,6 +34,13 @@ x-reliability-env: &reliability-env
   RELIABILITY_DB: "/data/reliability.db"
   RELIABILITY_QUEUE: "/data/queue.db"
   RELIABILITY_MAX_ATTEMPTS: "${RELIABILITY_MAX_ATTEMPTS:-5}"
+  # Sentry (К-5): dead-letter и недоступность LLM-пула становятся адресуемым
+  # событием, а не строкой в логах контейнера. DSN пуст → Sentry выключен
+  # целиком (это и процедура отката: убрать переменную + рестарт).
+  SENTRY_DSN: "${SENTRY_DSN:-}"
+  SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-production}"
+  SENTRY_RELEASE: "${SENTRY_RELEASE:-}"
+  SENTRY_TRACES_SAMPLE_RATE: "${SENTRY_TRACES_SAMPLE_RATE:-0}"
 
 services:
   # Одноразовая сборка базового образа pr-agent из upstream. Не «служит» — только
