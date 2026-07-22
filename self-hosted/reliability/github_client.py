@@ -104,8 +104,10 @@ class GitHubAppClient:
             page += 1
 
     def list_pull_files(self, repo: str, number: int) -> list:
-        """Изменённые файлы PR (пагинация): [{filename, additions, deletions, status}].
-        Источник для классификатора размера (ФТ-APRP-1) и плана чанков (ФТ-APRP-4)."""
+        """Изменённые файлы PR (пагинация): [{filename, additions, deletions, status, patch}].
+        Источник для классификатора размера (ФТ-APRP-1), плана чанков (ФТ-APRP-4) и
+        ревью чанка (ФТ-APRP-7). `patch` GitHub отдаёт и так; для бинарных/огромных
+        файлов он пустой."""
         out, page = [], 1
         while True:
             s, b = self._transport(
@@ -117,7 +119,8 @@ class GitHubAppClient:
             out.extend({"filename": f.get("filename", ""),
                         "additions": int(f.get("additions", 0)),
                         "deletions": int(f.get("deletions", 0)),
-                        "status": f.get("status", "modified")} for f in items)
+                        "status": f.get("status", "modified"),
+                        "patch": f.get("patch", "")} for f in items)
             if len(items) < 100:
                 return out
             page += 1
