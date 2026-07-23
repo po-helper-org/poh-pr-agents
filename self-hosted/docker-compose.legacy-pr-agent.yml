@@ -53,7 +53,7 @@ services:
           printf 'custom_model_max_tokens = %s\n' "$${CONFIG_MAX_TOKENS:-128000}"
           # ai_timeout: fail-fast — зависший LLM-вызов падает за N c, а не держит
           # воркер бесконечно (Фаза 0, issue #1; было 120 по умолчанию).
-          printf 'ai_timeout = %s\n' "$${CONFIG_AI_TIMEOUT:-90}"
+          printf 'ai_timeout = %s\n' "$${CONFIG_AI_TIMEOUT:-600}"
           printf '\n[github]\n'
           printf 'deployment_type = "app"\n'
           printf 'app_id = "%s"\n' "$$GITHUB_APP_ID"

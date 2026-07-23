@@ -161,10 +161,16 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
                       failure_threshold=int(os.environ.get("RELIABILITY_CB_THRESHOLD", "5")),
                       reset_timeout=float(os.environ.get("RELIABILITY_CB_RESET", "30"))))],
         limiter=TokenBucket(rate=rate, capacity=burst),
-        attempt_timeout=float(os.environ.get("RELIABILITY_ATTEMPT_TIMEOUT", "75")))
+        attempt_timeout=float(os.environ.get("RELIABILITY_ATTEMPT_TIMEOUT", "630")))
 
+    # Инвариант таймаутов (все в секундах, ↑ управляются через .env):
+    #   CONFIG_AI_TIMEOUT ≤ ATTEMPT_TIMEOUT < TASK_TIMEOUT < VISIBILITY_TIMEOUT
+    # LLM-кап = 10 мин (CONFIG_AI_TIMEOUT=600); внешние гварды с запасом, чтобы
+    # НЕ прервать легитимно идущее 10-мин ревью и не передоставить его в очередь
+    # (иначе конкурентный дубль-review, СТ-инвариант в run_once).
     run_forever(queue, store=store, client=client, analyze=gateway.run,
-                task_timeout=float(os.environ.get("RELIABILITY_TASK_TIMEOUT", "90")),
+                visibility_timeout=float(os.environ.get("RELIABILITY_VISIBILITY_TIMEOUT", "720")),
+                task_timeout=float(os.environ.get("RELIABILITY_TASK_TIMEOUT", "660")),
                 max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")),
                 backoff=float(os.environ.get("RELIABILITY_BACKOFF", "10")),          # ×attempts на сбое
                 backpressure_delay=float(os.environ.get("RELIABILITY_BACKPRESSURE_DELAY", "5")))
