@@ -6,7 +6,7 @@ from reliability.gateway import GatewayCircuitOpen
 from reliability.queue import DurableQueue
 from reliability.state import Backpressure, Event, State, StateStore, event_to_dict
 from reliability.supervisor import process
-from reliability.worker import TaskTimeout, handle_lease, run_once
+from reliability.worker import TaskTimeout, handle_lease, resolve_timeouts, run_once
 
 
 class FakeAnalyze:
@@ -194,6 +194,31 @@ class TestWorker(unittest.TestCase):
         self.assertTrue(run_once(self.queue, store=self.store, client=self.client,
                                  analyze=FakeAnalyze()))
         self.assertEqual(self.store.state_of("d1"), State.DONE)
+
+
+class ResolveTimeoutsTest(unittest.TestCase):
+    def test_defaults_hold_invariant(self):
+        ai, attempt, task, visibility = resolve_timeouts({})
+        self.assertEqual((ai, attempt, task, visibility), (600.0, 630.0, 660.0, 720.0))
+        self.assertLessEqual(ai, attempt)
+        self.assertLess(attempt, task)
+        self.assertLess(task, visibility)
+
+    def test_custom_valid_override(self):
+        env = {"CONFIG_AI_TIMEOUT": "300", "RELIABILITY_ATTEMPT_TIMEOUT": "300",
+               "RELIABILITY_TASK_TIMEOUT": "330", "RELIABILITY_VISIBILITY_TIMEOUT": "360"}
+        self.assertEqual(resolve_timeouts(env), (300.0, 300.0, 330.0, 360.0))
+
+    def test_stale_env_breaks_invariant_fails_fast(self):
+        # CONFIG_AI_TIMEOUT=600, но устаревший TASK=90 → падаем на старте.
+        env = {"CONFIG_AI_TIMEOUT": "600", "RELIABILITY_TASK_TIMEOUT": "90"}
+        with self.assertRaises(ValueError):
+            resolve_timeouts(env)
+
+    def test_task_not_below_visibility(self):
+        env = {"RELIABILITY_TASK_TIMEOUT": "800", "RELIABILITY_VISIBILITY_TIMEOUT": "720"}
+        with self.assertRaises(ValueError):
+            resolve_timeouts(env)
 
 
 if __name__ == "__main__":

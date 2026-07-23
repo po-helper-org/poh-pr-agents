@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Callable, Optional
 
@@ -133,9 +134,29 @@ def run_forever(queue, *, store, client, analyze, idle_sleep=1.0, **kw):  # prag
             time.sleep(idle_sleep)
 
 
-def main():  # pragma: no cover - deploy entrypoint (отдельный процесс воркера)
-    import os
+def resolve_timeouts(env=None) -> tuple[float, float, float, float]:
+    """Читает 4 слоя таймаута из окружения и проверяет инвариант, fail-fast.
 
+    Инвариант: CONFIG_AI_TIMEOUT ≤ ATTEMPT < TASK < VISIBILITY. Один override
+    в устаревшем .env (напр. CONFIG_AI_TIMEOUT=600 при TASK=90) молча ломал бы
+    порядок и возвращал баг дубль-review — поэтому падаем на старте с явным
+    сообщением, а не деградируем в рантайме. Возвращает (ai, attempt, task,
+    visibility)."""
+    env = env if env is not None else os.environ
+    ai = float(env.get("CONFIG_AI_TIMEOUT", "600"))
+    attempt = float(env.get("RELIABILITY_ATTEMPT_TIMEOUT", "630"))
+    task = float(env.get("RELIABILITY_TASK_TIMEOUT", "660"))
+    visibility = float(env.get("RELIABILITY_VISIBILITY_TIMEOUT", "720"))
+    if not (ai <= attempt < task < visibility):
+        raise ValueError(
+            "нарушен инвариант таймаутов: требуется CONFIG_AI_TIMEOUT ≤ "
+            "RELIABILITY_ATTEMPT_TIMEOUT < RELIABILITY_TASK_TIMEOUT < "
+            "RELIABILITY_VISIBILITY_TIMEOUT, получено "
+            f"ai={ai} attempt={attempt} task={task} visibility={visibility}")
+    return ai, attempt, task, visibility
+
+
+def main():  # pragma: no cover - deploy entrypoint (отдельный процесс воркера)
     from reliability import analyze_adapter, logging_setup, sentry_setup
     logging_setup.configure()  # reliability.* → stdout (логи обработки в контейнере worker)
     sentry_setup.configure("worker")  # no-op без SENTRY_DSN
@@ -153,6 +174,12 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
     # засчитался цепи внутри gateway, а не съелся внешним таймаутом.
     # ⚠️ rate limit ПРОЦЕССНЫЙ: при N воркерах суммарный RPS ≈ N×rate. Задавать
     # RELIABILITY_LLM_RPS ≈ (лимит Z.AI) / (макс. число реплик воркера).
+    # Слои таймаута (все в секундах, ↑ управляются через .env). LLM-кап = 10 мин
+    # (CONFIG_AI_TIMEOUT=600); внешние гварды с запасом, чтобы НЕ прервать
+    # легитимно идущее 10-мин ревью и не передоставить его в очередь (иначе
+    # конкурентный дубль-review). resolve_timeouts проверяет инвариант fail-fast.
+    _ai_timeout, attempt_timeout, task_timeout, visibility_timeout = resolve_timeouts()
+
     rate = float(os.environ.get("RELIABILITY_LLM_RPS", "3"))
     burst = float(os.environ.get("RELIABILITY_LLM_BURST", "6"))
     gateway = Gateway(
@@ -161,10 +188,11 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
                       failure_threshold=int(os.environ.get("RELIABILITY_CB_THRESHOLD", "5")),
                       reset_timeout=float(os.environ.get("RELIABILITY_CB_RESET", "30"))))],
         limiter=TokenBucket(rate=rate, capacity=burst),
-        attempt_timeout=float(os.environ.get("RELIABILITY_ATTEMPT_TIMEOUT", "75")))
+        attempt_timeout=attempt_timeout)
 
     run_forever(queue, store=store, client=client, analyze=gateway.run,
-                task_timeout=float(os.environ.get("RELIABILITY_TASK_TIMEOUT", "90")),
+                visibility_timeout=visibility_timeout,
+                task_timeout=task_timeout,
                 max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")),
                 backoff=float(os.environ.get("RELIABILITY_BACKOFF", "10")),          # ×attempts на сбое
                 backpressure_delay=float(os.environ.get("RELIABILITY_BACKPRESSURE_DELAY", "5")))
