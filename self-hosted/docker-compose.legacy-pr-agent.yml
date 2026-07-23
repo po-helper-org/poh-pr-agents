@@ -53,6 +53,9 @@ services:
           printf 'custom_model_max_tokens = %s\n' "$${CONFIG_MAX_TOKENS:-128000}"
           # ai_timeout: fail-fast — зависший LLM-вызов падает за N c, а не держит
           # воркер бесконечно (Фаза 0, issue #1; было 120 по умолчанию).
+          # Здесь ЕДИНСТВЕННЫЙ слой таймаута: это «голый» pr-agent без reliability-
+          # очереди/воркера, поэтому RELIABILITY_ATTEMPT/TASK/VISIBILITY не нужны и
+          # инвариант из docker-compose.yml сюда не применяется.
           printf 'ai_timeout = %s\n' "$${CONFIG_AI_TIMEOUT:-600}"
           printf '\n[github]\n'
           printf 'deployment_type = "app"\n'
