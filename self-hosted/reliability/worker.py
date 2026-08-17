@@ -12,7 +12,7 @@ import os
 import time
 from typing import Callable, Optional
 
-from reliability import metrics, sentry_setup
+from reliability import agent_event, metrics, sentry_setup
 from reliability.notifier import GitHubClient, notify_failure
 from reliability.queue import DurableQueue, Lease
 from reliability.state import Backpressure, State, StateStore, event_from_dict
@@ -55,6 +55,31 @@ def _drive_to_dead_letter(store: StateStore, delivery_id: str) -> None:
     store.transition(delivery_id, State.DEAD_LETTER)
 
 
+def _report_to_issue_cycle(client, event, status: str, detail: str = "") -> None:
+    """Доложить циклу Issue о состоянии ревью (H3).
+
+    Только `/review`: `/describe` переписывает описание PR и фазу задачи не
+    двигает — доложить о нём как о ревью значило бы сдвинуть фазу работой,
+    которой не было.
+
+    Ключ задачи берётся из тела PR (`Closes #N`). Не нашёлся — событие всё
+    равно уходит: Issue-Agent запишет его как сироту, и факт останется видимым,
+    вместо того чтобы исчезнуть здесь.
+
+    Ничего не поднимает: ревью уже опубликовано, и сбой доклада не должен
+    превращать сделанную работу в nack.
+    """
+    if event.command != "/review" or not agent_event.configured():
+        return
+    try:
+        root = agent_event.parse_root_issue(client.get_pull_body(event.repo, event.number))
+        agent_event.report(event.repo, event.number, status,
+                           root_issue=root, detail=detail)
+    except Exception as exc:
+        logger.warning("доклад в цикл Issue не собран (%s#%s): %s",
+                       event.repo, event.number, exc)
+
+
 def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
                  client: GitHubClient, analyze, run_fn=run_with_timeout,
                  task_timeout: float = 90, max_attempts: int = 5, backoff: float = 0,
@@ -72,6 +97,12 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
             logger.info("processed: delivery=%s command=%s → ack%s",
                         event.delivery_id, event.command,
                         " (skipped: already done/in-flight)" if result.skipped else "")
+            # Доклад только по фактически выполненной работе: `skipped` означает,
+            # что ревью сделал сиблинг, и он же о нём доложил. Второй доклад тем
+            # же ключом цикл схлопнет, но слать его — притворяться, что мы
+            # что-то сделали.
+            if not result.skipped:
+                _report_to_issue_cycle(client, event, agent_event.STARTED)
             return "ack"
         reason = result.error or "analysis_failed"   # точный класс сбоя → в коммент/метрику
     except Backpressure:
@@ -99,6 +130,8 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
         metrics.incr("dead_letter_total")
         sentry_setup.capture_dead_letter(event, reason or "unknown", lease.attempts)
         notify_failure(client, event, reason, lease.attempts, escalated=True)  # точный класс сбоя
+        _report_to_issue_cycle(client, event, agent_event.FAILED,
+                               detail=f"ревью не выполнено: {reason}")
         logger.warning("processed: delivery=%s command=%s → DEAD-LETTER (reason=%s attempts=%d) "
                        "— видимый коммент в PR", event.delivery_id, event.command, reason, lease.attempts)
     else:
