@@ -31,6 +31,11 @@ x-reliability-env: &reliability-env
   GITHUB_APP_ID: "${GITHUB_APP_ID}"
   GITHUB_WEBHOOK_SECRET: "${GITHUB_WEBHOOK_SECRET}"
   GITHUB_PRIVATE_KEY_B64: "${GITHUB_PRIVATE_KEY_B64}"
+  # Доклад в цикл Issue (точка передачи H3 протокола агентов): после ревью
+  # PR-Agent двигает фазу задачи в Issue-Agent. Обе переменные пусты → канал
+  # выключен целиком, ревью работает как раньше — это же и процедура отката.
+  ISSUE_AGENT_URL: "${ISSUE_AGENT_URL:-}"
+  AGENT_EVENT_SECRET: "${AGENT_EVENT_SECRET:-}"
   RELIABILITY_DB: "/data/reliability.db"
   RELIABILITY_QUEUE: "/data/queue.db"
   RELIABILITY_MAX_ATTEMPTS: "${RELIABILITY_MAX_ATTEMPTS:-5}"
