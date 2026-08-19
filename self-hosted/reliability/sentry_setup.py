@@ -72,10 +72,40 @@ def _is_aiohttp_leak_noise(event: dict) -> bool:
     return message.startswith(_AIOHTTP_LEAK_NOISE)
 
 
+# Отказы чужой стороны: провайдер модели не ответил или ответил 5xx. Контур
+# повлиять на них не может, а выглядят они как обычные ошибки уровня error и
+# заводят новое issue на каждую формулировку сообщения провайдера.
+#
+# Не отбрасываем — аутейдж провайдера остаётся причиной большей части
+# несостоявшихся ревью, и слепота тут дороже шума. Понижаем до warning и
+# склеиваем по типу, чтобы чужое было отличимо от своего с одного взгляда.
+# Ответы GitHub (403/422/502) сюда НЕ входят: за ними обычно стоит наша
+# ошибка — нет прав, кривой запрос, — и понижать их нельзя.
+_EXTERNAL_FAILURES = {
+    "GatewayUnavailable",   # все провайдеры шлюза отказали (gateway.py)
+    "RateLimitError",       # 429 от провайдера модели
+    "APITimeoutError",
+    "APIConnectionError",
+    "InternalServerError",  # 5xx и 524
+}
+
+
+def _classify_external(event: dict) -> None:
+    values = (event.get("exception") or {}).get("values") or []
+    if not values:
+        return
+    exc_type = values[-1].get("type")
+    if exc_type in _EXTERNAL_FAILURES:
+        event["level"] = "warning"
+        event["fingerprint"] = ["external_failure", exc_type]
+        event.setdefault("tags", {})["failure_side"] = "external"
+
+
 def _scrub_event(event: dict, hint=None) -> Optional[dict]:
     """before_send: отсеять шум чужой библиотеки, вычистить секреты."""
     if _is_aiohttp_leak_noise(event):
         return None
+    _classify_external(event)
     for value in (event.get("exception") or {}).get("values") or []:
         for frame in (value.get("stacktrace") or {}).get("frames") or []:
             _scrub_mapping(frame.get("vars"))

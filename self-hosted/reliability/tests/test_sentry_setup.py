@@ -122,3 +122,31 @@ class TestAiohttpLeakNoise(unittest.TestCase):
                  "logentry": {"message": "Unclosed client session"},
                  "level": "error"}
         self.assertIsNotNone(sentry_setup._scrub_event(event))
+
+
+class TestExternalFailureClassification(unittest.TestCase):
+    """Отказ провайдера не должен выглядеть как баг контура."""
+
+    @staticmethod
+    def _event(exc_type):
+        return {"exception": {"values": [{"type": exc_type, "value": "..."}]},
+                "level": "error"}
+
+    def test_gateway_and_provider_failures_are_downgraded(self):
+        for exc_type in ("GatewayUnavailable", "InternalServerError",
+                         "RateLimitError", "APITimeoutError"):
+            with self.subTest(exc_type=exc_type):
+                event = sentry_setup._scrub_event(self._event(exc_type))
+                self.assertEqual(event["level"], "warning")
+                self.assertEqual(event["fingerprint"], ["external_failure", exc_type])
+                self.assertEqual(event["tags"]["failure_side"], "external")
+
+    def test_github_answers_keep_their_level(self):
+        """403/422/502 от GitHub — обычно наша ошибка: прав нет, запрос кривой."""
+        event = sentry_setup._scrub_event(self._event("HTTPError"))
+        self.assertEqual(event["level"], "error")
+        self.assertNotIn("fingerprint", event)
+
+    def test_our_own_bug_keeps_its_level(self):
+        event = sentry_setup._scrub_event(self._event("KeyError"))
+        self.assertEqual(event["level"], "error")
