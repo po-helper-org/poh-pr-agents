@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Callable, Optional
 
-from reliability import metrics
+from reliability import agent_event, metrics, sentry_setup
 from reliability.mapreduce import CHUNK_EVENT, REDUCE_EVENT
 from reliability.notifier import GitHubClient, notify_failure
 from reliability.queue import DurableQueue, Lease
@@ -57,6 +58,31 @@ def _drive_to_dead_letter(store: StateStore, delivery_id: str) -> None:
     store.transition(delivery_id, State.DEAD_LETTER)
 
 
+def _report_to_issue_cycle(client, event, status: str, detail: str = "") -> None:
+    """Доложить циклу Issue о состоянии ревью (H3).
+
+    Только `/review`: `/describe` переписывает описание PR и фазу задачи не
+    двигает — доложить о нём как о ревью значило бы сдвинуть фазу работой,
+    которой не было.
+
+    Ключ задачи берётся из тела PR (`Closes #N`). Не нашёлся — событие всё
+    равно уходит: Issue-Agent запишет его как сироту, и факт останется видимым,
+    вместо того чтобы исчезнуть здесь.
+
+    Ничего не поднимает: ревью уже опубликовано, и сбой доклада не должен
+    превращать сделанную работу в nack.
+    """
+    if event.command != "/review" or not agent_event.configured():
+        return
+    try:
+        root = agent_event.parse_root_issue(client.get_pull_body(event.repo, event.number))
+        agent_event.report(event.repo, event.number, status,
+                           root_issue=root, detail=detail)
+    except Exception as exc:
+        logger.warning("доклад в цикл Issue не собран (%s#%s): %s",
+                       event.repo, event.number, exc)
+
+
 def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
                  client: GitHubClient, analyze, run_fn=run_with_timeout,
                  task_timeout: float = 90, max_attempts: int = 5, backoff: float = 0,
@@ -81,6 +107,12 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
             logger.info("processed: delivery=%s command=%s → ack%s",
                         event.delivery_id, event.command,
                         " (skipped: already done/in-flight)" if result.skipped else "")
+            # Доклад только по фактически выполненной работе: `skipped` означает,
+            # что ревью сделал сиблинг, и он же о нём доложил. Второй доклад тем
+            # же ключом цикл схлопнет, но слать его — притворяться, что мы
+            # что-то сделали.
+            if not result.skipped:
+                _report_to_issue_cycle(client, event, agent_event.STARTED)
             return "ack"
         reason = result.error or "analysis_failed"   # точный класс сбоя → в коммент/метрику
     except Backpressure:
@@ -106,7 +138,10 @@ def handle_lease(lease: Lease, *, queue: DurableQueue, store: StateStore,
         # но снимаем сразу, не заставляя сиблинга ждать своей следующей попытки.
         store.release_claim(event.business_key, event.delivery_id)
         metrics.incr("dead_letter_total")
+        sentry_setup.capture_dead_letter(event, reason or "unknown", lease.attempts)
         notify_failure(client, event, reason, lease.attempts, escalated=True)  # точный класс сбоя
+        _report_to_issue_cycle(client, event, agent_event.FAILED,
+                               detail=f"ревью не выполнено: {reason}")
         logger.warning("processed: delivery=%s command=%s → DEAD-LETTER (reason=%s attempts=%d) "
                        "— видимый коммент в PR", event.delivery_id, event.command, reason, lease.attempts)
     else:
@@ -142,39 +177,32 @@ def run_forever(queue, *, store, client, analyze, idle_sleep=1.0, **kw):  # prag
             time.sleep(idle_sleep)
 
 
-def resolve_worker_timeouts(env) -> dict:
-    """Вложенность таймаутов (ФТ-APRP-11): `ai < attempt < task < visibility`.
+def resolve_timeouts(env=None) -> tuple[float, float, float, float]:
+    """Читает 4 слоя таймаута из окружения и проверяет инвариант, fail-fast.
 
-    pr-agent ретраит вызов модели ВНУТРЕННЕ (`MODEL_RETRIES`, захардкожено upstream —
-    конфиг-ключа нет), поэтому один вызов провайдера длится до ~`MODEL_RETRIES × ai`.
-    `attempt_timeout` gateway обязан это покрывать: иначе gateway бросает ещё живой
-    поток pr-agent по своему таймауту, а брошенный поток продолжает дожигать Z.AI
-    (наблюдалось `ai=90 → time taken=271.79s`). Дефолты подобраны с запасом на
-    внутренние ретраи; circuit breaker ограничивает повторные медленные сбои.
-
-    Инвертированные/тесные значения авто-исправляются (с предупреждением), чтобы прод
-    не поднялся с `task ≥ visibility` (иначе очередь передоставит ещё обрабатываемое
-    сообщение — двойная обработка, СТ-17)."""
-    attempt = float(env.get("RELIABILITY_ATTEMPT_TIMEOUT", "200"))
-    task = float(env.get("RELIABILITY_TASK_TIMEOUT", "210"))
-    visibility = float(env.get("RELIABILITY_VISIBILITY_TIMEOUT", "0") or 0)
-    if task <= attempt:
-        logger.warning("timeout nesting: task(%.0f) <= attempt(%.0f) → поднимаю task",
-                       task, attempt)
-        task = attempt + 10
-    if visibility <= task:
-        if visibility:
-            logger.warning("timeout nesting: visibility(%.0f) <= task(%.0f) → поднимаю visibility",
-                           visibility, task)
-        visibility = task + 60
-    return {"attempt": attempt, "task": task, "visibility": visibility}
+    Инвариант: CONFIG_AI_TIMEOUT ≤ ATTEMPT < TASK < VISIBILITY. Один override
+    в устаревшем .env (напр. CONFIG_AI_TIMEOUT=600 при TASK=90) молча ломал бы
+    порядок и возвращал баг дубль-review — поэтому падаем на старте с явным
+    сообщением, а не деградируем в рантайме. Возвращает (ai, attempt, task,
+    visibility)."""
+    env = env if env is not None else os.environ
+    ai = float(env.get("CONFIG_AI_TIMEOUT", "600"))
+    attempt = float(env.get("RELIABILITY_ATTEMPT_TIMEOUT", "630"))
+    task = float(env.get("RELIABILITY_TASK_TIMEOUT", "660"))
+    visibility = float(env.get("RELIABILITY_VISIBILITY_TIMEOUT", "720"))
+    if not (ai <= attempt < task < visibility):
+        raise ValueError(
+            "нарушен инвариант таймаутов: требуется CONFIG_AI_TIMEOUT ≤ "
+            "RELIABILITY_ATTEMPT_TIMEOUT < RELIABILITY_TASK_TIMEOUT < "
+            "RELIABILITY_VISIBILITY_TIMEOUT, получено "
+            f"ai={ai} attempt={attempt} task={task} visibility={visibility}")
+    return ai, attempt, task, visibility
 
 
 def main():  # pragma: no cover - deploy entrypoint (отдельный процесс воркера)
-    import os
-
-    from reliability import analyze_adapter, logging_setup
+    from reliability import analyze_adapter, logging_setup, sentry_setup
     logging_setup.configure()  # reliability.* → stdout (логи обработки в контейнере worker)
+    sentry_setup.configure("worker")  # no-op без SENTRY_DSN
     from reliability.gateway import CircuitBreaker, Gateway, Provider, TokenBucket
     from reliability.github_client import GitHubAppClient
 
@@ -189,16 +217,21 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
     # засчитался цепи внутри gateway, а не съелся внешним таймаутом.
     # ⚠️ rate limit ПРОЦЕССНЫЙ: при N воркерах суммарный RPS ≈ N×rate. Задавать
     # RELIABILITY_LLM_RPS ≈ (лимит Z.AI) / (макс. число реплик воркера).
+    # Слои таймаута (все в секундах, ↑ управляются через .env). LLM-кап = 10 мин
+    # (CONFIG_AI_TIMEOUT=600); внешние гварды с запасом, чтобы НЕ прервать
+    # легитимно идущее 10-мин ревью и не передоставить его в очередь (иначе
+    # конкурентный дубль-review). resolve_timeouts проверяет инвариант fail-fast.
+    _ai_timeout, attempt_timeout, task_timeout, visibility_timeout = resolve_timeouts()
+
     rate = float(os.environ.get("RELIABILITY_LLM_RPS", "3"))
     burst = float(os.environ.get("RELIABILITY_LLM_BURST", "6"))
-    tmo = resolve_worker_timeouts(os.environ)  # ФТ-APRP-11: ai < attempt < task < visibility
     gateway = Gateway(
         [Provider("zai", analyze_adapter.run,
                   breaker=CircuitBreaker(
                       failure_threshold=int(os.environ.get("RELIABILITY_CB_THRESHOLD", "5")),
                       reset_timeout=float(os.environ.get("RELIABILITY_CB_RESET", "30"))))],
         limiter=TokenBucket(rate=rate, capacity=burst),
-        attempt_timeout=tmo["attempt"])
+        attempt_timeout=attempt_timeout)
 
     # ── map-reduce (ФТ-APRP-2/6/8, пункт B) — только при флаге RELIABILITY_MAPREDUCE ──
     # OFF по умолчанию: прод-путь одиночного прохода не меняется, мерж в main безопасен.
@@ -226,8 +259,8 @@ def main():  # pragma: no cover - deploy entrypoint (отдельный проц
         logger.info("map-reduce ВКЛЮЧЁН (RELIABILITY_MAPREDUCE): большой /review идёт по частям")
 
     run_forever(queue, store=store, client=client, analyze=analyze,
-                task_timeout=tmo["task"],
-                visibility_timeout=tmo["visibility"],
+                task_timeout=task_timeout,
+                visibility_timeout=visibility_timeout,
                 max_attempts=int(os.environ.get("RELIABILITY_MAX_ATTEMPTS", "5")),
                 backoff=float(os.environ.get("RELIABILITY_BACKOFF", "10")),          # ×attempts на сбое
                 backpressure_delay=float(os.environ.get("RELIABILITY_BACKPRESSURE_DELAY", "5")),

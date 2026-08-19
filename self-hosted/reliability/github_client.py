@@ -88,6 +88,23 @@ class GitHubAppClient:
             raise RuntimeError(f"get pull {s}: {b[:200]!r}")
         return ((json.loads(b).get("head") or {}).get("sha")) or ""
 
+    def get_pull_body(self, repo: str, number: int) -> str:
+        """Тело PR — источник сквозного ключа `Closes #N` (AGENT-PROTOCOL, §3).
+
+        По нему событие ревью связывается с исходной задачей в Issue-Agent. Пусто
+        при 404 и при любой ошибке: доклад в цикл — вспомогательный канал, и
+        уронить из-за него уже выполненное ревью нельзя. Некоррелированное
+        событие Issue-Agent запишет как сироту, и оно останется видимым.
+        """
+        try:
+            s, b = self._transport(
+                "GET", f"{self._api}/repos/{repo}/pulls/{number}", None, self._headers(repo))
+        except Exception:
+            return ""
+        if s >= 300:
+            return ""
+        return (json.loads(b).get("body")) or ""
+
     def list_open_pulls(self, repo: str) -> list:
         """Открытые PR репозитория (по всем страницам) — для reconciliation sweeper."""
         out, page = [], 1

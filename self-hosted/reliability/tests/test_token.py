@@ -1,6 +1,7 @@
 """Логика минтинга/кэша installation-токена (без крипто и сети)."""
 import json
 import unittest
+from datetime import datetime, timezone
 
 from reliability.token import InstallationTokenProvider
 
@@ -94,3 +95,52 @@ class TestInstallationTokenProvider(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRefreshMarginCoversTheWholeRun(unittest.TestCase):
+    """PR-AGENT-B/C/D: ревью сгенерировано, публикация упала на 401.
+
+    Токен берётся один раз в начале прогона и отдаётся pr-agent в настройки, а
+    публикует он ревью в самом конце — спустя минуты. Запас в 60 секунд считал
+    годным токен, который к моменту публикации уже мёртв.
+    """
+
+    class _ExpiringTransport(FakeTransport):
+        def __call__(self, method, url, headers, data):
+            if url.endswith("/installation"):
+                return 200, json.dumps({"id": 42}).encode()
+            if url.endswith("/access_tokens"):
+                self.calls.append((method, url))
+                n = len([c for c in self.calls if c[1].endswith("/access_tokens")])
+                return 201, json.dumps({
+                    "token": f"ghs_{n}",
+                    "expires_at": "2026-08-19T10:00:00Z",
+                }).encode()
+            return 404, b"{}"
+
+    def test_token_with_minutes_left_is_refetched(self):
+        transport = self._ExpiringTransport()
+        expiry = datetime(2026, 8, 19, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+
+        clock = Clock()
+        clock.t = expiry - 3600            # час до истечения — токен свежий
+        provider = InstallationTokenProvider("a", "P", transport, signer, clock=lambda: clock.t)
+        first = provider.get("o/r")
+
+        clock.t = expiry - 300             # осталось 5 минут: прогон столько идёт
+        second = provider.get("o/r")
+
+        self.assertNotEqual(first, second,
+                            "отдан токен, который умрёт до конца прогона")
+
+    def test_cache_still_works_for_the_bulk_of_the_hour(self):
+        transport = self._ExpiringTransport()
+        expiry = datetime(2026, 8, 19, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+
+        clock = Clock()
+        clock.t = expiry - 3600
+        provider = InstallationTokenProvider("a", "P", transport, signer, clock=lambda: clock.t)
+        first = provider.get("o/r")
+
+        clock.t = expiry - 1200            # 20 минут в запасе — обмен не нужен
+        self.assertEqual(provider.get("o/r"), first)

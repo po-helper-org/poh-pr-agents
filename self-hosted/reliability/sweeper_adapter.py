@@ -14,10 +14,13 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional
 
 from reliability.sweeper import OpenPR, business_key
 from reliability.state import StateStore
+
+_log = logging.getLogger("reliability.sweeper")
 
 # (repo, number, head_sha, command) -> артефакт ревью присутствует на GitHub
 VerifyReview = Callable[[str, int, str, str], bool]
@@ -64,6 +67,94 @@ def make_list_open_prs(client, repos):  # pragma: no cover - реальные в
     return list_open_prs
 
 
+def parse_repo_specs(repos):
+    """Делит записи RELIABILITY_REPOS на точные репо и маски.
+
+    Каждая запись — одно из:
+      * `owner/repo` — конкретный репозиторий (как раньше);
+      * `owner/*`    — маска: все репозитории установки App на этот owner (орг/аккаунт);
+      * `owner`      — голый owner без `/repo`: тоже маска `owner/*` (в контексте свипера
+                       у записи без `/` нет иного валидного смысла — как `owner/repo` она
+                       всегда даёт 401 на `/repos/{owner}/installation`);
+      * `*`          — все репозитории всех установок App (то же, что пустой RELIABILITY_REPOS).
+
+    Возвращает `(concrete, mask_owners)`: `concrete` — список `owner/repo`;
+    `mask_owners` — список owner'ов для раскрытия (для `*` кладём маркер `"*"`).
+    Пустые записи игнорируются. Чистая функция → тестируется без сети."""
+    concrete, mask_owners = [], []
+    for spec in repos:
+        spec = spec.strip()
+        if not spec:
+            continue
+        if spec == "*":
+            mask_owners.append("*")
+        elif spec.endswith("/*"):
+            mask_owners.append(spec[: -len("/*")])
+        elif "/" not in spec:
+            mask_owners.append(spec)  # голый owner → маска owner/* (не валиден как owner/repo)
+        else:
+            concrete.append(spec)
+    return concrete, mask_owners
+
+
+def resolve_masked_repos(mask_owners, provider, client):
+    """Раскрывает маски `owner/*` в реальные `owner/repo` через установки App.
+
+    `owner/*` → репозитории установки App на этот owner; `*` → репо всех установок.
+    Owner сопоставляется по `installation.account.login` (регистронезависимо).
+    Неизвестный owner (App не установлен на орг) пропускается — свипер не должен
+    падать/молчать из-за одной несуществующей маски; живые ревью и так идут по
+    webhook. Вызывается на КАЖДОМ проходе свипера → новые репо орг подхватываются
+    автоматически, список руками вести не нужно.
+
+    `provider`/`client` инъектируются → раскрытие тестируется без сети."""
+    if not mask_owners:
+        return []
+    want_all = "*" in mask_owners
+    wanted = {o.lower() for o in mask_owners if o != "*"}
+    out = []
+    for inst in provider.list_installations():
+        login = ((inst.get("account") or {}).get("login") or "")
+        if want_all or login.lower() in wanted:
+            token = provider.token_for(inst["id"])
+            out.extend(client.list_installation_repos(token))
+    return out
+
+
+def _open_prs_of(client, repo, log):
+    """Открытые PR одного репозитория; отказ по нему — не отказ обхода.
+
+    Свипер обходит охват App целиком, и один недоступный репозиторий валил весь
+    проход: GitHub отвечает 403 (нет прав на репо либо исчерпан лимит), urllib
+    поднимает HTTPError, и прогон умирает, не дойдя до остальных. В Sentry это
+    дало 171 одинаковое падение (PR-AGENT-N) — и ни одного просвипанного PR за
+    те проходы. Пропущенное здесь ревью не теряется: живые события идут по
+    webhook, а следующий проход попробует репозиторий снова.
+    """
+    try:
+        return parse_open_prs(client.list_open_pulls(repo), repo)
+    except Exception as exc:
+        log.warning("sweeper: %s пропущен (%s: %s)", repo, type(exc).__name__, exc)
+        return []
+
+
+def make_list_open_prs_masked(client, provider, repos):
+    """`list_open_prs` с поддержкой масок `owner/*` (и `*`) вперемешку с точными
+    `owner/repo`. Маски раскрываются на каждом проходе (новые репо орг — сами);
+    точные и раскрытые репо объединяются и дедуплицируются (порядок сохраняется).
+    Пустой охват (маска на неустановленный owner, точных нет) → пустой список."""
+    concrete, mask_owners = parse_repo_specs(repos)
+
+    def list_open_prs():
+        repos_now = list(dict.fromkeys(
+            concrete + resolve_masked_repos(mask_owners, provider, client)))
+        prs = []
+        for repo in repos_now:
+            prs.extend(_open_prs_of(client, repo, _log))
+        return prs
+    return list_open_prs
+
+
 def make_list_open_prs_all(client, provider):
     """org-wide бэкстоп: обходит ВСЕ установки App и их репозитории (вкл. новые и
     несколько орг/аккаунтов сразу). Используется, когда RELIABILITY_REPOS пуст —
@@ -74,6 +165,6 @@ def make_list_open_prs_all(client, provider):
         for inst in provider.list_installations():
             token = provider.token_for(inst["id"])
             for repo in client.list_installation_repos(token):
-                prs.extend(parse_open_prs(client.list_open_pulls(repo), repo))
+                prs.extend(_open_prs_of(client, repo, _log))
         return prs
     return list_open_prs

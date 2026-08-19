@@ -19,15 +19,32 @@ JwtSigner = Callable[[str, str, int, int], str]
 
 
 class InstallationTokenProvider:
+    # Запас, с которым токен считается негодным ДО фактического истечения.
+    #
+    # Это не защита от сетевого лага, а покрытие длительности работы: токен
+    # берётся один раз в начале прогона (analyze_adapter._real_invoke отдаёт его
+    # pr-agent в настройки), а публикация ревью случается в самом конце —
+    # спустя минуты. При прежнем запасе в 60 секунд токен с остатком жизни
+    # минуту выдавался как годный, и уже сгенерированное ревью падало на
+    # публикации с «401 Bad credentials» (PR-AGENT-B/C/D): работа модели
+    # оплачена, результат не доехал.
+    #
+    # 11 минут — чуть больше потолка одной попытки (RELIABILITY_ATTEMPT_TIMEOUT,
+    # по умолчанию 630с). Токен GitHub живёт час, так что кэш по-прежнему
+    # накрывает ~49 минут из каждого часа.
+    DEFAULT_REFRESH_MARGIN_SEC = 660.0
+
     def __init__(self, app_id: str, private_key_pem: str, transport: Transport,
                  jwt_signer: JwtSigner, api_base: str = "https://api.github.com",
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 refresh_margin_sec: float = DEFAULT_REFRESH_MARGIN_SEC):
         self._app_id = app_id
         self._pem = private_key_pem
         self._transport = transport
         self._sign = jwt_signer
         self._api = api_base.rstrip("/")
         self._clock = clock
+        self._margin = refresh_margin_sec
         self._cache: dict[str, "tuple[str, float]"] = {}
         # сериализует получение токена (редкое — кэш ~1 ч), чтобы конкурентный
         # промах не породил дублирующие обмены и не бил по rate-limit GitHub.
@@ -36,7 +53,7 @@ class InstallationTokenProvider:
     def get(self, repo: str) -> str:
         with self._lock:
             cached = self._cache.get(repo)
-            if cached and cached[1] - 60 > self._clock():  # запас 60 c до истечения
+            if cached and cached[1] - self._margin > self._clock():
                 return cached[0]
             token, exp = self._exchange(repo)
             self._cache[repo] = (token, exp)

@@ -10,13 +10,14 @@ import os
 
 from fastapi import FastAPI, Request, Response
 
-from reliability import logging_setup, metrics
+from reliability import logging_setup, metrics, sentry_setup
 from reliability.ingress import handle_webhook
 from reliability.queue import DurableQueue
 from reliability.state import StateStore, event_to_dict
 from reliability.webhook import enrich_events
 
 logging_setup.configure()  # reliability.* → stdout (логи webhook'ов в контейнере ingress)
+sentry_setup.configure("ingress")  # no-op без SENTRY_DSN; FastAPI инструментируется автоматически
 
 WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 STORE_PATH = os.environ.get("RELIABILITY_DB", "/data/reliability.db")
