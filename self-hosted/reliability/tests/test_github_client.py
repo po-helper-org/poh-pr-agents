@@ -157,5 +157,32 @@ class TestListInstallationRepos(unittest.TestCase):
         self.assertEqual(len(c.list_installation_repos("t")), 101)
 
 
+class TestListPullFiles(unittest.TestCase):
+    def _client(self, pages):
+        def transport(method, url, data, headers):
+            self.assertEqual(method, "GET")
+            self.assertIn("/pulls/9/files", url)
+            p = int(re.search(r"[?&]page=(\d+)", url).group(1))
+            items = pages[p - 1] if p - 1 < len(pages) else []
+            return 200, json.dumps(items).encode()
+        return GitHubAppClient(token_provider=lambda repo: "x", transport=transport)
+
+    def test_maps_and_paginates(self):
+        page1 = [{"filename": f"f{i}.py", "additions": 1, "deletions": 0} for i in range(100)]
+        page2 = [{"filename": "last.py", "additions": 3, "deletions": 1, "status": "added"}]
+        files = self._client([page1, page2]).list_pull_files("o/r", 9)
+        self.assertEqual(len(files), 101)
+        self.assertEqual(files[-1]["filename"], "last.py")
+        self.assertEqual(files[-1]["additions"], 3)
+        self.assertEqual(files[-1]["status"], "added")
+
+    def test_error_raises(self):
+        def transport(method, url, data, headers):
+            return 500, b"boom"
+        c = GitHubAppClient(token_provider=lambda repo: "x", transport=transport)
+        with self.assertRaises(RuntimeError):
+            c.list_pull_files("o/r", 9)
+
+
 if __name__ == "__main__":
     unittest.main()

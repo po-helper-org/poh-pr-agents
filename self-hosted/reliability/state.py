@@ -6,6 +6,7 @@ SQLite-backed store (stdlib). На старте Фазы 1 достаточно 
 from __future__ import annotations
 
 import enum
+import json
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -115,6 +116,26 @@ class StateStore:
                 business_key TEXT PRIMARY KEY,
                 delivery_id  TEXT NOT NULL,
                 updated_at   REAL NOT NULL
+            );
+            -- map-reduce fan-in (ФТ-APRP-6/8): агрегат по PR + findings чанков.
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_key        TEXT PRIMARY KEY,
+                head_sha       TEXT NOT NULL,
+                total_chunks   INTEGER NOT NULL,
+                done_chunks    INTEGER NOT NULL DEFAULT 0,   -- отчитавшихся (ok|fail)
+                failed_chunks  INTEGER NOT NULL DEFAULT 0,
+                reduce_started INTEGER NOT NULL DEFAULT 0,    -- CAS-барьер (M4)
+                created_at     REAL NOT NULL,
+                updated_at     REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chunk_findings (
+                job_key     TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                files       TEXT NOT NULL,     -- JSON-список путей
+                findings    TEXT NOT NULL,
+                ok          INTEGER NOT NULL,
+                updated_at  REAL NOT NULL,
+                PRIMARY KEY (job_key, chunk_index)
             );
             """
         )
@@ -292,3 +313,70 @@ class StateStore:
             "SELECT delivery_id FROM claims WHERE business_key=?", (business_key,)
         ).fetchone()
         return row[0] if row else None
+
+    # ── map-reduce job (fan-in) ─────────────────────────────────────────────
+    def create_job(self, job_key: str, head_sha: str, total_chunks: int) -> bool:
+        """Завести job для большого PR. Идемпотентно (повтор доставки не сбрасывает
+        прогресс). True — создан впервые."""
+        now = self._clock()
+        inserted = self._db.execute(
+            "INSERT INTO jobs(job_key,head_sha,total_chunks,created_at,updated_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(job_key) DO NOTHING",
+            (job_key, head_sha, total_chunks, now, now),
+        ).rowcount
+        self._db.commit()
+        return bool(inserted)
+
+    def record_chunk_finding(self, job_key: str, chunk_index: int, files: list,
+                             findings: str, ok: bool) -> None:
+        """Записать результат чанка в стор (M3: findings НЕ в коммент). Идемпотентно
+        по (job_key, chunk_index) — передоставка чанка не двоит счётчики (counters
+        пересчитываются из таблицы, а не инкрементом)."""
+        now = self._clock()
+        self._db.execute(
+            "INSERT INTO chunk_findings(job_key,chunk_index,files,findings,ok,updated_at) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(job_key,chunk_index) DO UPDATE SET "
+            "files=excluded.files, findings=excluded.findings, ok=excluded.ok, "
+            "updated_at=excluded.updated_at",
+            (job_key, chunk_index, json.dumps(files), findings, 1 if ok else 0, now),
+        )
+        row = self._db.execute(
+            "SELECT COUNT(*) done, COALESCE(SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END),0) failed "
+            "FROM chunk_findings WHERE job_key=?", (job_key,),
+        ).fetchone()
+        self._db.execute(
+            "UPDATE jobs SET done_chunks=?, failed_chunks=?, updated_at=? WHERE job_key=?",
+            (int(row["done"]), int(row["failed"]), now, job_key),
+        )
+        self._db.commit()
+
+    def job_all_reported(self, job_key: str) -> bool:
+        """Все чанки отчитались (ok|fail) — можно собирать reduce (в т.ч. partial)."""
+        row = self._db.execute(
+            "SELECT total_chunks, done_chunks FROM jobs WHERE job_key=?", (job_key,)
+        ).fetchone()
+        return bool(row) and int(row["done_chunks"]) >= int(row["total_chunks"])
+
+    def try_start_reduce(self, job_key: str) -> bool:
+        """CAS-барьер (M4): перевести reduce_started 0→1. True — ровно у одного
+        победителя; остальные (передоставка/гонка) получают False и reduce не двоят."""
+        now = self._clock()
+        won = self._db.execute(
+            "UPDATE jobs SET reduce_started=1, updated_at=? WHERE job_key=? AND reduce_started=0",
+            (now, job_key),
+        ).rowcount
+        self._db.commit()
+        return bool(won)
+
+    def job_findings(self, job_key: str) -> list:
+        """[(chunk_index, files:list, findings, ok:bool)] в порядке индекса."""
+        rows = self._db.execute(
+            "SELECT chunk_index, files, findings, ok FROM chunk_findings "
+            "WHERE job_key=? ORDER BY chunk_index", (job_key,),
+        ).fetchall()
+        return [(int(r["chunk_index"]), json.loads(r["files"]), r["findings"], bool(r["ok"]))
+                for r in rows]
+
+    def job_status(self, job_key: str) -> Optional[dict]:
+        row = self._db.execute("SELECT * FROM jobs WHERE job_key=?", (job_key,)).fetchone()
+        return dict(row) if row else None
