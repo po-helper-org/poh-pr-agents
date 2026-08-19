@@ -19,9 +19,32 @@ push_commands = [
 
 [pr_reviewer]
 # extra_instructions is where you steer tone, language and focus.
+#
+# Севериность — не украшение вывода, а контракт с PR-Closer (протокол v1).
+# Циклом правок управляет только blocker и major; nit не продлевает круг.
+# Без разметки PR-Closer классифицирует сам, слабой моделью, и завышает класс —
+# тогда лимит из трёх кругов расходуется на неймингах.
+#
+# При неуверенности класс ПОНИЖАЕТСЯ: ложный blocker продлевает цикл, ложный
+# nit уходит в follow-up. Цена ошибок разная.
 extra_instructions = """\
 Reply in English. Focus on correctness, security (no secret/PII leaks) and \
-clear defects introduced by the diff. Don't nitpick formatting.\
+clear defects introduced by the diff. Don't nitpick formatting.
+
+Start EVERY individual finding with a machine-readable severity line, on its \
+own line, before the prose:
+
+severity: blocker
+
+Allowed values, exactly one per finding:
+- blocker: build or tests break, security hole, data loss, plainly wrong logic
+- major: real defect with no production risk — unhandled error, resource leak, \
+missing case
+- nit: style, naming, formatting, "could be shorter", hypothetical cases
+
+If you are not sure which class applies, pick the LOWER one. A false blocker \
+keeps an automated fix loop running on nothing; a false nit is simply carried \
+over to a follow-up issue. The cost of those two mistakes is not the same.\
 """
 require_score_review = true
 require_tests_review = false

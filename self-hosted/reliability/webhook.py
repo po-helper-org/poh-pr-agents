@@ -6,12 +6,39 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from typing import Callable
 
 from reliability.state import Event
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_PR_COMMANDS = ("/describe", "/review")
+
+# Протокол взаимодействия агентов v1 (po-helper-org/.github):
+#   pr-closer:closed — работа агентов над этим PR завершена стоп-словом;
+#   agents:off       — человек забрал PR у агентов одним действием.
+# Обе метки уважают все сервисы контура. Проверка стоит здесь, в разборе
+# payload, а не глубже: метки уже приходят вместе с событием, и отказ не стоит
+# ни одного обращения к API, тем более к модели. Смысл ровно в этом — не тратить
+# бюджет на PR, который уже закрыт для агентов.
+STOP_LABELS = frozenset({"pr-closer:closed", "agents:off"})
+
+
+def stop_labels_present(payload: dict) -> frozenset[str]:
+    """Стоп-метки из payload события.
+
+    Читаем и pull_request, и issue: у issue_comment PR приходит под ключом
+    `issue`, и метки лежат там же.
+    """
+    names: set[str] = set()
+    for key in ("pull_request", "issue"):
+        for label in (payload.get(key) or {}).get("labels") or []:
+            name = label.get("name") if isinstance(label, dict) else label
+            if name:
+                names.add(str(name))
+    return frozenset(names & STOP_LABELS)
 
 # (repo, number) -> head_sha ("" если issue не является PR / API недоступен)
 FetchHeadSha = Callable[[str, int], str]
@@ -48,6 +75,15 @@ PR_TRIGGER_ACTIONS = frozenset({"opened", "reopened", "ready_for_review", "synch
 
 def parse_events(event_type: str, delivery_id: str, payload: dict,
                  pr_commands=DEFAULT_PR_COMMANDS) -> list[Event]:
+    stopped = stop_labels_present(payload)
+    if stopped:
+        # Снятие метки — осознанное действие человека, и оно возвращает PR
+        # в оборот. Пока метка стоит, не запускается ничего, включая явную
+        # команду в комментарии: иначе рубильник переставал бы быть рубильником.
+        logger.info("событие пропущено: на PR стоит %s (event=%s delivery=%s)",
+                    ", ".join(sorted(stopped)), event_type, delivery_id)
+        return []
+
     if event_type == "pull_request":
         if payload.get("action") not in PR_TRIGGER_ACTIONS:
             return []

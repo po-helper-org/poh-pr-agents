@@ -1,7 +1,7 @@
 """СТ-8: разбор webhook → Event + обогащение head_sha."""
 import unittest
 
-from reliability.webhook import enrich_events, parse_events
+from reliability.webhook import enrich_events, parse_events, stop_labels_present
 
 
 def pr_payload(action="opened"):
@@ -89,3 +89,56 @@ class TestEnrichHeadSha(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStopLabels(unittest.TestCase):
+    """Протокол v1: pr-closer:closed и agents:off останавливают агентов.
+
+    Без этой проверки инвариант «после стоп-слова ни один агент не пишет
+    в эту ветку» держался бы на добросовестности, а не на механизме: PR-Closer
+    метку ставит, но сам себя ею не остановит.
+    """
+
+    def labeled_pr(self, *names, action="opened"):
+        payload = pr_payload(action)
+        payload["pull_request"]["labels"] = [{"name": n} for n in names]
+        return payload
+
+    def labeled_comment(self, *names, body="/review"):
+        return {
+            "action": "created",
+            "repository": {"full_name": "o/r"},
+            "issue": {"number": 7, "labels": [{"name": n} for n in names]},
+            "comment": {"body": body},
+        }
+
+    def test_closed_label_stops_pr_event(self):
+        self.assertEqual(parse_events("pull_request", "d", self.labeled_pr("pr-closer:closed")), [])
+
+    def test_agents_off_stops_pr_event(self):
+        self.assertEqual(parse_events("pull_request", "d", self.labeled_pr("agents:off")), [])
+
+    def test_explicit_command_is_stopped_too(self):
+        # Рубильник, который обходится явной командой, рубильником не является.
+        self.assertEqual(parse_events("issue_comment", "d", self.labeled_comment("agents:off")), [])
+
+    def test_other_labels_do_not_stop(self):
+        evs = parse_events("pull_request", "d", self.labeled_pr("enhancement", "Review effort 1/5"))
+        self.assertTrue(evs)
+
+    def test_no_labels_key_is_not_a_stop(self):
+        self.assertTrue(parse_events("pull_request", "d", pr_payload("opened")))
+
+    def test_labels_are_read_from_both_shapes(self):
+        self.assertEqual(stop_labels_present(self.labeled_pr("agents:off")), {"agents:off"})
+        self.assertEqual(stop_labels_present(self.labeled_comment("pr-closer:closed")),
+                         {"pr-closer:closed"})
+        self.assertEqual(stop_labels_present({}), frozenset())
+
+    def test_removing_the_label_returns_the_pr_to_work(self):
+        # Снятие метки — осознанное действие человека, и оно должно работать
+        # без перезапуска чего-либо.
+        stopped = self.labeled_pr("agents:off", action="synchronize")
+        self.assertEqual(parse_events("pull_request", "d", stopped), [])
+        stopped["pull_request"]["labels"] = []
+        self.assertTrue(parse_events("pull_request", "d", stopped))
