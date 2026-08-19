@@ -14,10 +14,13 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional
 
 from reliability.sweeper import OpenPR, business_key
 from reliability.state import StateStore
+
+_log = logging.getLogger("reliability.sweeper")
 
 # (repo, number, head_sha, command) -> артефакт ревью присутствует на GitHub
 VerifyReview = Callable[[str, int, str, str], bool]
@@ -118,6 +121,23 @@ def resolve_masked_repos(mask_owners, provider, client):
     return out
 
 
+def _open_prs_of(client, repo, log):
+    """Открытые PR одного репозитория; отказ по нему — не отказ обхода.
+
+    Свипер обходит охват App целиком, и один недоступный репозиторий валил весь
+    проход: GitHub отвечает 403 (нет прав на репо либо исчерпан лимит), urllib
+    поднимает HTTPError, и прогон умирает, не дойдя до остальных. В Sentry это
+    дало 171 одинаковое падение (PR-AGENT-N) — и ни одного просвипанного PR за
+    те проходы. Пропущенное здесь ревью не теряется: живые события идут по
+    webhook, а следующий проход попробует репозиторий снова.
+    """
+    try:
+        return parse_open_prs(client.list_open_pulls(repo), repo)
+    except Exception as exc:
+        log.warning("sweeper: %s пропущен (%s: %s)", repo, type(exc).__name__, exc)
+        return []
+
+
 def make_list_open_prs_masked(client, provider, repos):
     """`list_open_prs` с поддержкой масок `owner/*` (и `*`) вперемешку с точными
     `owner/repo`. Маски раскрываются на каждом проходе (новые репо орг — сами);
@@ -130,7 +150,7 @@ def make_list_open_prs_masked(client, provider, repos):
             concrete + resolve_masked_repos(mask_owners, provider, client)))
         prs = []
         for repo in repos_now:
-            prs.extend(parse_open_prs(client.list_open_pulls(repo), repo))
+            prs.extend(_open_prs_of(client, repo, _log))
         return prs
     return list_open_prs
 
@@ -145,6 +165,6 @@ def make_list_open_prs_all(client, provider):
         for inst in provider.list_installations():
             token = provider.token_for(inst["id"])
             for repo in client.list_installation_repos(token):
-                prs.extend(parse_open_prs(client.list_open_pulls(repo), repo))
+                prs.extend(_open_prs_of(client, repo, _log))
         return prs
     return list_open_prs

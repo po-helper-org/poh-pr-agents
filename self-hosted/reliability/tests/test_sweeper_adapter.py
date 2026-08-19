@@ -207,3 +207,43 @@ class TestSwallowedFailureVerify(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneRepoFailureDoesNotStopTheSweep(unittest.TestCase):
+    """PR-AGENT-N: 403 по одному репозиторию валил весь проход свипера.
+
+    GitHub отвечает 403 и на отсутствие прав, и на исчерпанный лимит. urllib
+    поднимает HTTPError, оно доходило до верха раннера — 171 падение в Sentry и
+    ни одного просвипанного PR за эти проходы.
+    """
+
+    class _FlakyClient(FakeClient):
+        def list_open_pulls(self, repo):
+            if repo == "ai-oxudevelopment/dos-assistant-web":
+                raise RuntimeError("HTTP Error 403: Forbidden")
+            return self.pulls_by_repo.get(repo, [])
+
+    def test_masked_walk_skips_the_broken_repo(self):
+        provider = FakeProvider([{"id": 11, "account": {"login": "po-helper-org"}}])
+        client = self._FlakyClient(
+            repos_by_token={"tok-11": ["po-helper-org/a",
+                                       "ai-oxudevelopment/dos-assistant-web",
+                                       "po-helper-org/b"]},
+            pulls_by_repo={"po-helper-org/a": [{"number": 1, "head": {"sha": "s1"}}],
+                           "po-helper-org/b": [{"number": 2, "head": {"sha": "s2"}}]})
+
+        prs = make_list_open_prs_masked(client, provider, ["po-helper-org/*"])()
+
+        self.assertEqual([(p.repo, p.number) for p in prs],
+                         [("po-helper-org/a", 1), ("po-helper-org/b", 2)])
+
+    def test_org_wide_walk_skips_the_broken_repo(self):
+        provider = FakeProvider([{"id": 11}])
+        client = self._FlakyClient(
+            repos_by_token={"tok-11": ["ai-oxudevelopment/dos-assistant-web",
+                                       "po-helper-org/a"]},
+            pulls_by_repo={"po-helper-org/a": [{"number": 1, "head": {"sha": "s1"}}]})
+
+        prs = make_list_open_prs_all(client, provider)()
+
+        self.assertEqual([(p.repo, p.number) for p in prs], [("po-helper-org/a", 1)])
