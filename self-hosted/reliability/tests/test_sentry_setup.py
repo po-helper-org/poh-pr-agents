@@ -88,3 +88,37 @@ class TestOptional(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAiohttpLeakNoise(unittest.TestCase):
+    """PR-AGENT-9/T/X: 200 событий «Unclosed …» от чужой библиотеки за месяц.
+
+    Их пишет aiohttp через логгер asyncio, когда `pr_agent` бросает свою
+    ClientSession незакрытой в `asyncio.run`. Ни стека, ни нашего кадра — в
+    списке они лишь топят настоящие сбои.
+    """
+
+    def test_unclosed_session_is_dropped(self):
+        event = {"logger": "asyncio",
+                 "logentry": {"message": "Unclosed client session\nclient_session: <...>"},
+                 "level": "error"}
+        self.assertIsNone(sentry_setup._scrub_event(event))
+
+    def test_unclosed_connector_is_dropped(self):
+        event = {"logger": "asyncio",
+                 "logentry": {"message": "Unclosed connector\nconnections: [...]"},
+                 "level": "error"}
+        self.assertIsNone(sentry_setup._scrub_event(event))
+
+    def test_other_asyncio_errors_survive(self):
+        event = {"logger": "asyncio",
+                 "logentry": {"message": "Task exception was never retrieved"},
+                 "level": "error"}
+        self.assertIsNotNone(sentry_setup._scrub_event(event))
+
+    def test_our_own_unclosed_wording_from_another_logger_survives(self):
+        """Отсев привязан к логгеру asyncio: свои сообщения не глушим."""
+        event = {"logger": "reliability.worker",
+                 "logentry": {"message": "Unclosed client session"},
+                 "level": "error"}
+        self.assertIsNotNone(sentry_setup._scrub_event(event))

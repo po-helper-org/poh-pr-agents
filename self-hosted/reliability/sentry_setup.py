@@ -50,8 +50,32 @@ def _scrub_mapping(d) -> None:
             d[k] = v[:_MAX_VALUE_LEN] + "…[truncated]"
 
 
+# Предсмертные жалобы aiohttp на незакрытые ресурсы. Приходят от логгера
+# asyncio уровнем ERROR, без стека и без единого нашего кадра: сигнала в них
+# ноль, а объём — 200 событий за месяц (PR-AGENT-9, PR-AGENT-T, PR-AGENT-X),
+# в которых тонут настоящие сбои.
+#
+# Источник чужой и починке с нашей стороны не поддаётся: `pr_agent` заводит
+# ClientSession внутри `asyncio.run(PRAgent().handle_request(...))`
+# (analyze_adapter._real_invoke) и не закрывает её перед закрытием цикла. Наш
+# код aiohttp не использует вовсе — поэтому отсев здесь не может спрятать
+# ничего своего.
+_AIOHTTP_LEAK_NOISE = ("Unclosed client session", "Unclosed connector")
+
+
+def _is_aiohttp_leak_noise(event: dict) -> bool:
+    if event.get("logger") != "asyncio":
+        return False
+    message = event.get("logentry", {}).get("message") or ""
+    if not message:
+        message = str((event.get("message") or ""))
+    return message.startswith(_AIOHTTP_LEAK_NOISE)
+
+
 def _scrub_event(event: dict, hint=None) -> Optional[dict]:
-    """before_send: вычистить секреты из кадров стека, request и extra."""
+    """before_send: отсеять шум чужой библиотеки, вычистить секреты."""
+    if _is_aiohttp_leak_noise(event):
+        return None
     for value in (event.get("exception") or {}).get("values") or []:
         for frame in (value.get("stacktrace") or {}).get("frames") or []:
             _scrub_mapping(frame.get("vars"))
