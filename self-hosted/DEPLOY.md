@@ -119,11 +119,11 @@ RELIABILITY_REPOS=po-helper-org/*,ai-oxudevelopment/*
 ### Все репозитории организаций/аккаунтов
 
 Чтобы обрабатывать несколько орг/аккаунтов (напр. `po-helper-org`,
-`ai-oxudevelopment` и репо `kibarik/mts-po-workspace`):
+`ai-oxudevelopment` и репо `kibarik/private-workspace`):
 
 1. **Установи один и тот же GitHub App на каждый** аккаунт/орг:
    - для орга — Install → **All repositories** (тогда и будущие репо покрыты);
-   - для аккаунта `kibarik` — Install → **Only select repositories** → `mts-po-workspace`.
+   - для аккаунта `kibarik` — Install → **Only select repositories** → `private-workspace`.
    Один App = несколько установок (installations); webhook'и всех репо приходят на
    один и тот же ingress.
 2. **Задай охват свипера** через `RELIABILITY_REPOS`:
