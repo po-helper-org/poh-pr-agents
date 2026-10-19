@@ -1,0 +1,11 @@
+# Напоминание о кейсе доработки в docs/solutions/ (не блокирует слияние).
+# Соглашение: https://github.com/po-helper-org/.github/blob/main/SOLUTIONS.md
+name: solutions-check
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  pull-requests: write
+jobs:
+  check:
+    uses: po-helper-org/.github/.github/workflows/solutions-check.yml@main
