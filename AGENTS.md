@@ -197,3 +197,8 @@ bash finish-registration.sh <code>      # создаст dokploy.env
 - Список провайдеров litellm: https://docs.litellm.ai/docs/providers
 - Полный runbook self-hosted + грабли: [`self-hosted/SETUP.md`](self-hosted/SETUP.md)
 - Цикл «правка → повторная проверка» после ревью: [`README.md`](README.md)
+
+## Кейсы доработок
+
+Доработка, починка или инцидент → кейс `docs/solutions/<дата>-<кейс>.md` в том же PR
+(соглашение — https://github.com/po-helper-org/.github/blob/main/SOLUTIONS.md). Перед похожей работой — загляни в `docs/solutions/README.md`.
