@@ -85,15 +85,15 @@ class TestListOpenPrsAll(unittest.TestCase):
         provider = FakeProvider([{"id": 11}, {"id": 22}])
         client = FakeClient(
             repos_by_token={"tok-11": ["po-helper-org/a", "po-helper-org/b"],
-                            "tok-22": ["kibarik/mts-po-workspace"]},
+                            "tok-22": ["kibarik/private-workspace"]},
             pulls_by_repo={
                 "po-helper-org/a": [{"number": 1, "head": {"sha": "s1"}}],
                 "po-helper-org/b": [],
-                "kibarik/mts-po-workspace": [{"number": 9, "head": {"sha": "s9"}}],
+                "kibarik/private-workspace": [{"number": 9, "head": {"sha": "s9"}}],
             })
         prs = make_list_open_prs_all(client, provider)()
         self.assertEqual(sorted((p.repo, p.number) for p in prs),
-                         [("kibarik/mts-po-workspace", 9), ("po-helper-org/a", 1)])
+                         [("kibarik/private-workspace", 9), ("po-helper-org/a", 1)])
         self.assertEqual(provider.token_calls, [11, 22])  # токен на каждую установку
 
 
@@ -128,7 +128,7 @@ class TestResolveMaskedRepos(unittest.TestCase):
         client = FakeClient(
             repos_by_token={"tok-11": ["po-helper-org/a", "po-helper-org/b"],
                             "tok-22": ["ai-oxudevelopment/x"],
-                            "tok-33": ["kibarik/mts-po-workspace"]},
+                            "tok-33": ["kibarik/private-workspace"]},
             pulls_by_repo={})
         return provider, client
 
@@ -157,7 +157,7 @@ class TestResolveMaskedRepos(unittest.TestCase):
         provider, client = self._fixture()
         repos = resolve_masked_repos(["*"], provider, client)
         self.assertEqual(sorted(repos),
-                         ["ai-oxudevelopment/x", "kibarik/mts-po-workspace",
+                         ["ai-oxudevelopment/x", "kibarik/private-workspace",
                           "po-helper-org/a", "po-helper-org/b"])
         self.assertEqual(provider.token_calls, [11, 22, 33])
 
